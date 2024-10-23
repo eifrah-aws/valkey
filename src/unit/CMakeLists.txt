@@ -40,7 +40,10 @@ if (USE_JEMALLOC)
     target_link_libraries(valkey-unit-tests jemalloc)
 endif ()
 
-# Place this line last to ensure that ${ld_flags} is placed last on the linker line
+if (IS_FREEBSD)
+    target_link_libraries(valkey-unit-tests execinfo)
+endif ()
+
 target_link_libraries(
     valkey-unit-tests
     valkeylib
