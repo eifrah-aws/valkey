@@ -5,14 +5,26 @@ set(UNIT_TEST_SRCS "${UNIT_TEST_SRCS}")
 
 get_valkey_server_linker_option(VALKEY_SERVER_LDFLAGS)
 
+# Build unit tests only
+message(STATUS "Building unit tests")
+
+list(APPEND COMPILE_DEFINITIONS "SERVER_TEST=1")
+if (APPLE)
+    list(APPEND COMPILE_DEFINITIONS "VALKEY_USE_TEST_MAIN")
+    list(APPEND COMPILE_DEFINITIONS "VALKEY_USE_TEST_SERVER_ASSERT")
+endif ()
+list(APPEND COMPILE_FLAGS "-std=gnu11")
+
 # Build Valkey sources as a static library for the test
 add_library(valkeylib STATIC ${VALKEY_SERVER_SRCS})
-target_compile_options(valkeylib PRIVATE "-std=gnu11")
+target_compile_options(valkeylib PRIVATE "${COMPILE_FLAGS}")
+target_compile_definitions(valkeylib PRIVATE "${COMPILE_DEFINITIONS}")
 
 add_executable(valkey-unit-tests ${UNIT_TEST_SRCS})
+target_compile_options(valkey-unit-tests PRIVATE "${COMPILE_FLAGS}")
+target_compile_definitions(valkey-unit-tests PRIVATE "${COMPILE_DEFINITIONS}")
 add_dependencies(valkey-unit-tests generate_test_files_h)
 
-target_compile_options(valkey-unit-tests PRIVATE "-std=gnu11")
 if (UNIX AND NOT APPLE)
     # Avoid duplicate symbols on non macOS
     target_link_options(valkey-unit-tests PRIVATE "-Wl,--allow-multiple-definition")
