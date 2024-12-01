@@ -36,6 +36,10 @@ void send_reply_ok(void *c) {
     addReplyStatus((client *)c, "OK");
 }
 
+void send_reply_nil(void *c) {
+    addReplyNull((client *)c);
+}
+
 void send_reply_cstring(void *c, const char *msg) {
     addReplyBulkCString((client *)c, msg);
 }
