@@ -23,13 +23,20 @@ if (VALKEY_RELEASE_BUILD)
 endif ()
 
 if (BUILD_SANITIZER)
-    # 'BUILD_SANITIZER' is defined in ValkeySetup module (based on user input)
-    # If defined, the variables 'VALKEY_SANITAIZER_CFLAGS' and 'VALKEY_SANITAIZER_LDFLAGS'
-    # are set with the link & compile flags required
+    # 'BUILD_SANITIZER' is defined in ValkeySetup module (based on user input) If defined, the variables
+    # 'VALKEY_SANITAIZER_CFLAGS' and 'VALKEY_SANITAIZER_LDFLAGS' are set with the link & compile flags required
     message(STATUS "Adding sanitizer flags for target valkey-server")
     target_compile_options(valkey-server PRIVATE ${VALKEY_SANITAIZER_CFLAGS})
     target_link_options(valkey-server PRIVATE ${VALKEY_SANITAIZER_LDFLAGS})
 endif ()
+
+file(GLOB ROCKSDB_SOURCES "${CMAKE_SOURCE_DIR}/src/rocksdb/*.cpp" "${CMAKE_SOURCE_DIR}/src/rocksdb/*.c")
+add_library(rocksdb_calls STATIC ${ROCKSDB_SOURCES})
+target_link_libraries(rocksdb_calls rocksdb)
+
+# Link against RocksDB
+target_link_libraries(valkey-server rocksdb_calls)
+
 unset(BUILD_SANITIZER CACHE)
 
 # Target: valkey-cli

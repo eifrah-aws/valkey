@@ -2629,6 +2629,7 @@ void makeThreadKillable(void) {
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 }
 
+extern void rocksdb_initialise(void);
 void initServer(void) {
     int j;
 
@@ -2637,6 +2638,7 @@ void initServer(void) {
     setupSignalHandlers();
     ThreadsManager_init();
     makeThreadKillable();
+    rocksdb_initialise();
 
     if (server.syslog_enabled) {
         openlog(server.syslog_ident, LOG_PID | LOG_NDELAY | LOG_NOWAIT, server.syslog_facility);
@@ -3102,6 +3104,10 @@ int populateCommandStructure(struct serverCommand *c) {
 
 extern struct serverCommand serverCommandTable[];
 
+// eifrah
+extern void rocksdb_set_callback(client *c);
+extern void rocksdb_get_callback(client *c);
+
 /* Populates the Command Table dict from the static table in commands.c
  * which is auto generated from the json files in the commands folder. */
 void populateCommandTable(void) {
@@ -3116,6 +3122,15 @@ void populateCommandTable(void) {
 
         c->fullname = sdsnew(c->declared_name);
         if (populateCommandStructure(c) == C_ERR) continue;
+
+        // eifrah
+        if (c->proc == setCommand) {
+            c->proc = rocksdb_set_callback;
+        }
+        // eifrah
+        if (c->proc == getCommand) {
+            c->proc = rocksdb_get_callback;
+        }
 
         retval1 = dictAdd(server.commands, sdsdup(c->fullname), c);
         /* Populate an additional dictionary that will be unaffected
@@ -6526,8 +6541,8 @@ void dismissMemoryInChild(void) {
     /* madvise(MADV_DONTNEED) may not work if Transparent Huge Pages is enabled. */
     if (server.thp_enabled) return;
 
-        /* Currently we use zmadvise_dontneed only when we use jemalloc with Linux.
-         * so we avoid these pointless loops when they're not going to do anything. */
+    /* Currently we use zmadvise_dontneed only when we use jemalloc with Linux.
+     * so we avoid these pointless loops when they're not going to do anything. */
 #if defined(USE_JEMALLOC) && defined(__linux__)
     listIter li;
     listNode *ln;
@@ -6971,7 +6986,7 @@ __attribute__((weak)) int main(int argc, char **argv) {
     }
     if (server.sentinel_mode) sentinelCheckConfigFile();
 
-        /* Do system checks */
+    /* Do system checks */
 #ifdef __linux__
     linuxMemoryWarnings();
     sds err_msg = NULL;
