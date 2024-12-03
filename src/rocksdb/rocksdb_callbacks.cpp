@@ -56,8 +56,8 @@ void wal_flush_callback(rocksdb::DB *database) {
 }
 
 /// Read the database path from the environment variables
-std::optional<std::string> get_database_path() {
-    const char *path = ::getenv("ROCKSDB_PATH");
+std::optional<std::string> read_env_var(std::string_view name) {
+    const char *path = ::getenv(name.data());
     if (path) {
         return std::string(path);
     }
@@ -121,15 +121,15 @@ extern "C" void rocksdb_initialise(void) {
     options.OptimizeLevelStyleCompaction(64 * 1024 * 1024);
     options.create_if_missing = true;
     options.compression = rocksdb::CompressionType::kNoCompression;
-    options.manual_wal_flush = true;
 
     // Initialise global write options
     write_opts.sync = false;
 
-    // If we are interested in persistency, we can change this into "false" and use manual flushing of the WAL
-    write_opts.disableWAL = false;
+    bool use_wal = read_env_var("ROCKSB_USE_WAL").value_or("0") == "1";
+    write_opts.disableWAL = !use_wal;
+    options.manual_wal_flush = use_wal;
 
-    const auto dbpath = get_database_path().value_or(DB_PATH);
+    const auto dbpath = read_env_var("ROCKSDB_PATH").value_or(DB_PATH);
     rocksdb::Status s = rocksdb::DB::Open(options, dbpath, &pdb);
     if (!s.ok()) {
         // Abort
@@ -139,9 +139,10 @@ extern "C" void rocksdb_initialise(void) {
         std::abort();
     }
 
-    // TODO: launch thread for performing background WAL files
-    wal_flush_thread = new std::thread(wal_flush_callback, pdb);
-
+    if (use_wal) {
+        log_message("RocksDB WAL is used");
+        wal_flush_thread = new std::thread(wal_flush_callback, pdb);
+    }
     std::stringstream ss;
     ss << "RocksDB successfully initialised at: " << dbpath;
     log_message(ss.str().c_str());
@@ -160,10 +161,14 @@ extern "C" void rocksdb_shutdown(void) {
 
     log_message("RocksDB shutdown started...");
     shutdown.store(true);
-    pdb->FlushWAL(true);
-    wal_flush_thread->join();
-    delete wal_flush_thread;
-    wal_flush_thread = nullptr;
+
+    bool use_wal = read_env_var("ROCKSB_USE_WAL").value_or("0") == "1";
+    if (use_wal) {
+        pdb->FlushWAL(true);
+        wal_flush_thread->join();
+        delete wal_flush_thread;
+        wal_flush_thread = nullptr;
+    }
 
     pdb->Close();
     delete pdb;
