@@ -2,7 +2,7 @@ set(ROCKSDB_BUILD_SHARED
     OFF
     CACHE BOOL "Build shared libraries")
 set(WITH_SNAPPY
-    ON
+    OFF
     CACHE BOOL "Enable Snappy compression")
 set(WITH_GFLAGS
     OFF
