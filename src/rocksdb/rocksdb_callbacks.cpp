@@ -116,6 +116,8 @@ extern "C" void rocksdb_initialise(void) {
 
     rocksdb::Options options;
     options.IncreaseParallelism(4);
+    // This call defines bloom filter internally
+    options.OptimizeForPointLookup(64);
     options.OptimizeLevelStyleCompaction(64 * 1024 * 1024);
     options.create_if_missing = true;
     options.compression = rocksdb::CompressionType::kNoCompression;
