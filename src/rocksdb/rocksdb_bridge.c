@@ -1,4 +1,5 @@
 #include "../server.h"
+#include <stdlib.h>
 
 /// Process a "SET" command against RocksDB
 void rocksdb_set(void *, const char *[], const int);
@@ -46,4 +47,16 @@ void send_reply_cstring(void *c, const char *msg) {
 
 void send_reply_error(void *c, const char *errmsg) {
     addReplyError((client *)c, errmsg);
+}
+
+void log_message(const char *message) {
+    serverLog(LL_NOTICE,
+              "%s", message);
+}
+
+/// Return 1 of rocksb support should be enabled, 0 otherwise
+int rocksdb_enabled(void) {
+    // Check environment variable to see if RocksDB should be loaded
+    const char *penv = getenv("ROCKSDB_ENABLED");
+    return penv && strcmp("1", penv) == 0;
 }

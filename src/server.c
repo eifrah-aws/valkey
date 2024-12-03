@@ -2629,7 +2629,11 @@ void makeThreadKillable(void) {
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 }
 
+// eifrah
 extern void rocksdb_initialise(void);
+extern void rocksdb_shutdown(void);
+extern int rocksdb_enabled(void);
+
 void initServer(void) {
     int j;
 
@@ -3124,14 +3128,14 @@ void populateCommandTable(void) {
         if (populateCommandStructure(c) == C_ERR) continue;
 
         // eifrah
-        if (c->proc == setCommand) {
-            c->proc = rocksdb_set_callback;
+        if (rocksdb_enabled()) {
+            if (c->proc == setCommand) {
+                c->proc = rocksdb_set_callback;
+            }
+            if (c->proc == getCommand) {
+                c->proc = rocksdb_get_callback;
+            }
         }
-        // eifrah
-        if (c->proc == getCommand) {
-            c->proc = rocksdb_get_callback;
-        }
-
         retval1 = dictAdd(server.commands, sdsdup(c->fullname), c);
         /* Populate an additional dictionary that will be unaffected
          * by rename-command statements in valkey.conf. */
@@ -4433,6 +4437,9 @@ int finishShutdown(void) {
         serverLog(LL_NOTICE, "%d of %d replicas are in sync when shutting down.", num_replicas - num_lagging_replicas,
                   num_replicas);
     }
+
+    // eifrah
+    rocksdb_shutdown();
 
     /* Kill all the Lua debugger forked sessions. */
     ldbKillForkedSessions();

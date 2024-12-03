@@ -5,24 +5,32 @@
 #include "rocksdb/options.h"
 #include "rocksdb/slice.h"
 #include <iostream>
+#include <thread>
 
 extern "C" void send_reply_cstring(void *, const char *);
 extern "C" void send_reply_error(void *, const char *);
 extern "C" void send_reply_ok(void *);
 extern "C" void send_reply_nil(void *);
+extern "C" void log_message(const char *);
+extern "C" int rocksdb_enabled(void);
 
 namespace {
 /// Placing the database in /dev/shm enhances performance
-thread_local std::string DB_PATH = "/dev/shm/redis-on-rocks";
+static std::string DB_PATH = "/dev/shm/valkey-on-rocks";
 
 /// Global write options
-thread_local rocksdb::WriteOptions write_opts;
+static rocksdb::WriteOptions write_opts;
 
 /// The database - static variable as we can safely share it among threads
 static rocksdb::DB *pdb = nullptr;
 
 /// Use pinnable slice to avoid the memory copy of the value
-thread_local rocksdb::PinnableSlice pinnable_val;
+static rocksdb::PinnableSlice pinnable_val;
+
+/// Worker thread responsible for flushing the WAL file
+static std::thread *wal_flush_thread = nullptr;
+
+static std::atomic_bool shutdown = false;
 
 /// Helper pinnable guard to ensure that the pinnable is always reset before usage,
 /// and is released when leaving the scope
@@ -36,6 +44,25 @@ struct PinnableGuard {
         m_value.Reset();
     }
 };
+
+using namespace std::chrono_literals;
+void wal_flush_callback(rocksdb::DB *database) {
+    log_message("WAL flush thread started");
+    while (!shutdown.load()) {
+        pdb->FlushWAL(false);
+        std::this_thread::sleep_for(100ms);
+    }
+    log_message("WAL flush thread exited");
+}
+
+/// Read the database path from the environment variables
+std::optional<std::string> get_database_path() {
+    const char *path = ::getenv("ROCKSDB_PATH");
+    if (path) {
+        return std::string(path);
+    }
+    return {};
+}
 } // namespace
 
 /// Implement "SET" based on database
@@ -76,39 +103,68 @@ extern "C" void rocksdb_get(void *clnt, const char *argv[], const int argc) {
 
 /// Initialise the database options and open it
 extern "C" void rocksdb_initialise(void) {
+    if (!rocksdb_enabled()) {
+        log_message("rocksdb_initialise(): RocksDB: is not enabled");
+        return;
+    }
+
     if (pdb) {
         // Already opened
-        std::cerr << "rocksdb_initialise(): database is already initialised. Ignoring call" << std::endl;
+        log_message("rocksdb_initialise(): database is already initialised. Ignoring call");
         return;
     }
 
     rocksdb::Options options;
+    options.IncreaseParallelism(4);
+    options.OptimizeLevelStyleCompaction(64 * 1024 * 1024);
     options.create_if_missing = true;
-    options.max_background_jobs = 4;
-    options.compression = rocksdb::CompressionType::kSnappyCompression;
+    options.compression = rocksdb::CompressionType::kNoCompression;
+    options.manual_wal_flush = true;
 
     // Initialise global write options
     write_opts.sync = false;
 
     // If we are interested in persistency, we can change this into "false" and use manual flushing of the WAL
-    write_opts.disableWAL = true;
-    rocksdb::Status s = rocksdb::DB::Open(options, DB_PATH, &pdb);
+    write_opts.disableWAL = false;
+
+    rocksdb::Status s = rocksdb::DB::Open(options, get_database_path().value_or(DB_PATH), &pdb);
     if (!s.ok()) {
         // Abort
-        std::cerr << "Failed to open database. " << s.ToString() << std::endl;
+        std::stringstream ss;
+        ss << "Failed to open database. " << s.ToString();
+        log_message(ss.str().c_str());
         std::abort();
     }
 
     // TODO: launch thread for performing background WAL files
+    wal_flush_thread = new std::thread(wal_flush_callback, pdb);
+
+    std::stringstream ss;
+    ss << "RocksDB successfully initialised at: " << DB_PATH;
+    log_message(ss.str().c_str());
 }
 
 /// Shutdown the database
 extern "C" void rocksdb_shutdown(void) {
+    if (!rocksdb_enabled()) {
+        log_message("rocksdb_shutdown(): RocksDB: is not enabled");
+        return;
+    }
+
     if (!pdb) {
         return;
     }
-    // TODO:
-    // - Force flush the WAL (sync=true)
-    // - Shutdown the WAL flush thread
-    // - Close the database
+
+    log_message("RocksDB shutdown started...");
+    shutdown.store(true);
+    pdb->FlushWAL(true);
+    wal_flush_thread->join();
+    delete wal_flush_thread;
+    wal_flush_thread = nullptr;
+
+    pdb->Close();
+    delete pdb;
+    pdb = nullptr;
+
+    log_message("RocksDB shutdown started...done");
 }
