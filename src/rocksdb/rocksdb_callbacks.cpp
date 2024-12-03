@@ -127,7 +127,8 @@ extern "C" void rocksdb_initialise(void) {
     // If we are interested in persistency, we can change this into "false" and use manual flushing of the WAL
     write_opts.disableWAL = false;
 
-    rocksdb::Status s = rocksdb::DB::Open(options, get_database_path().value_or(DB_PATH), &pdb);
+    const auto dbpath = get_database_path().value_or(DB_PATH);
+    rocksdb::Status s = rocksdb::DB::Open(options, dbpath, &pdb);
     if (!s.ok()) {
         // Abort
         std::stringstream ss;
@@ -140,7 +141,7 @@ extern "C" void rocksdb_initialise(void) {
     wal_flush_thread = new std::thread(wal_flush_callback, pdb);
 
     std::stringstream ss;
-    ss << "RocksDB successfully initialised at: " << DB_PATH;
+    ss << "RocksDB successfully initialised at: " << dbpath;
     log_message(ss.str().c_str());
 }
 
