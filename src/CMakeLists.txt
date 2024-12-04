@@ -35,7 +35,7 @@ add_library(rocksdb_calls STATIC ${ROCKSDB_SOURCES})
 target_link_libraries(rocksdb_calls rocksdb)
 
 # Link against RocksDB
-target_link_libraries(valkey-server rocksdb_calls)
+target_link_libraries(valkey-server lmdb)
 
 unset(BUILD_SANITIZER CACHE)
 

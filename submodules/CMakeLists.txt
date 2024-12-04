@@ -19,4 +19,5 @@ set(WITH_CORE_TOOLS
 set(WITH_TOOLS
     OFF
     CACHE BOOL "Build tools")
-add_subdirectory(rocksdb)
+#add_subdirectory(rocksdb)
+add_subdirectory(lmdb)
