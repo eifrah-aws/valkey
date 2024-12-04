@@ -37,6 +37,7 @@ extern "C" void lmdb_set(void *clnt, const char *argv[], const int argc) {
         std::stringstream ss;
         ss << "-LMDB failed to put record in the database. " << db.last_error();
         send_reply_error(clnt, ss.str().c_str());
+        std::abort();
     }
 }
 
