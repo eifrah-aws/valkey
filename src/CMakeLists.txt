@@ -32,10 +32,11 @@ endif ()
 
 file(GLOB ROCKSDB_SOURCES "${CMAKE_SOURCE_DIR}/src/rocksdb/*.cpp" "${CMAKE_SOURCE_DIR}/src/rocksdb/*.c")
 add_library(rocksdb_calls STATIC ${ROCKSDB_SOURCES})
-target_link_libraries(rocksdb_calls rocksdb)
+target_link_libraries(rocksdb_calls liblmdbpp)
 
-# Link against RocksDB
-target_link_libraries(valkey-server lmdb)
+# Link against LMDB
+message(STATUS "Linking against lmdbpp")
+target_link_libraries(valkey-server rocksdb_calls)
 
 unset(BUILD_SANITIZER CACHE)
 
