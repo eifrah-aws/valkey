@@ -16,7 +16,6 @@ static std::string DB_PATH = "/tmp/valkey-on-lmdb";
 
 static lmdb::DB db;
 
-using namespace std::chrono_literals;
 /// Read the database path from the environment variables
 std::optional<std::string> read_env_var(std::string_view name) {
     const char *path = ::getenv(name.data());
