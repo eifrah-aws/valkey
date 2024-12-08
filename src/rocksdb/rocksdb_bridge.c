@@ -57,6 +57,6 @@ void log_message(const char *message) {
 /// Return 1 of rocksb support should be enabled, 0 otherwise
 int rocksdb_enabled(void) {
     // Check environment variable to see if RocksDB should be loaded
-    const char *penv = getenv("ROCKSDB_ENABLED");
+    const char *penv = getenv("DB_ENABLED");
     return penv && strcmp("1", penv) == 0;
 }

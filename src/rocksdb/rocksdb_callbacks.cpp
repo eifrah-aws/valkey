@@ -15,8 +15,8 @@ extern "C" void log_message(const char *);
 extern "C" int rocksdb_enabled(void);
 
 namespace {
-/// Placing the database in /dev/shm enhances performance
-static std::string DB_PATH = "/dev/shm/valkey-on-rocks";
+/// Default database location folder
+static std::string DB_PATH = "valkey-on-rocks.db";
 
 /// Global write options
 static rocksdb::WriteOptions write_opts;
@@ -129,7 +129,7 @@ extern "C" void rocksdb_initialise(void) {
     write_opts.disableWAL = !use_wal;
     options.manual_wal_flush = use_wal;
 
-    const auto dbpath = read_env_var("ROCKSDB_PATH").value_or(DB_PATH);
+    const auto dbpath = read_env_var("DB_PATH").value_or(DB_PATH);
     rocksdb::Status s = rocksdb::DB::Open(options, dbpath, &pdb);
     if (!s.ok()) {
         // Abort
@@ -174,5 +174,5 @@ extern "C" void rocksdb_shutdown(void) {
     delete pdb;
     pdb = nullptr;
 
-    log_message("RocksDB shutdown started...done");
+    log_message("RocksDB shut-down started...done");
 }
