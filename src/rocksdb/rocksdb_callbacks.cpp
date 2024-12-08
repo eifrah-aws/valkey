@@ -4,7 +4,6 @@
 #include "rocksdb/db.h"
 #include "rocksdb/options.h"
 #include "rocksdb/slice.h"
-#include <iostream>
 #include <thread>
 
 extern "C" void send_reply_cstring(void *, const char *);
@@ -117,7 +116,7 @@ extern "C" void rocksdb_initialise(void) {
     rocksdb::Options options;
     options.IncreaseParallelism(4);
     // This call defines bloom filter internally
-    options.OptimizeForPointLookup(64);
+    options.OptimizeForPointLookup(1024 * 4);
     options.OptimizeLevelStyleCompaction(64 * 1024 * 1024);
     options.create_if_missing = true;
     options.compression = rocksdb::CompressionType::kNoCompression;
