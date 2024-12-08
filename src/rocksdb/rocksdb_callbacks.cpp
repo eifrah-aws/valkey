@@ -12,7 +12,7 @@ extern "C" int LMDB_enabled(void);
 
 namespace {
 /// Placing the database in /dev/shm enhances performance
-static std::string DB_PATH = "/tmp/valkey-on-lmdb";
+static std::string DB_PATH = "valkey-on-lmdb.db";
 
 static lmdb::DB db;
 
