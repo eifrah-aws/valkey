@@ -2629,11 +2629,6 @@ void makeThreadKillable(void) {
     pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
 }
 
-// eifrah
-extern void rocksdb_initialise(void);
-extern void rocksdb_shutdown(void);
-extern int rocksdb_enabled(void);
-
 void initServer(void) {
     int j;
 
@@ -2642,7 +2637,6 @@ void initServer(void) {
     setupSignalHandlers();
     ThreadsManager_init();
     makeThreadKillable();
-    rocksdb_initialise();
 
     if (server.syslog_enabled) {
         openlog(server.syslog_ident, LOG_PID | LOG_NDELAY | LOG_NOWAIT, server.syslog_facility);
@@ -3108,10 +3102,6 @@ int populateCommandStructure(struct serverCommand *c) {
 
 extern struct serverCommand serverCommandTable[];
 
-// eifrah
-extern void rocksdb_set_callback(client *c);
-extern void rocksdb_get_callback(client *c);
-
 /* Populates the Command Table dict from the static table in commands.c
  * which is auto generated from the json files in the commands folder. */
 void populateCommandTable(void) {
@@ -3127,15 +3117,6 @@ void populateCommandTable(void) {
         c->fullname = sdsnew(c->declared_name);
         if (populateCommandStructure(c) == C_ERR) continue;
 
-        // eifrah
-        if (rocksdb_enabled()) {
-            if (c->proc == setCommand) {
-                c->proc = rocksdb_set_callback;
-            }
-            if (c->proc == getCommand) {
-                c->proc = rocksdb_get_callback;
-            }
-        }
         retval1 = dictAdd(server.commands, sdsdup(c->fullname), c);
         /* Populate an additional dictionary that will be unaffected
          * by rename-command statements in valkey.conf. */
@@ -4437,9 +4418,6 @@ int finishShutdown(void) {
         serverLog(LL_NOTICE, "%d of %d replicas are in sync when shutting down.", num_replicas - num_lagging_replicas,
                   num_replicas);
     }
-
-    // eifrah
-    rocksdb_shutdown();
 
     /* Kill all the Lua debugger forked sessions. */
     ldbKillForkedSessions();

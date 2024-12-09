@@ -1649,6 +1649,20 @@ VALKEYMODULE_API int (*ValkeyModule_RdbSave)(ValkeyModuleCtx *ctx,
                                              ValkeyModuleRdbStream *stream,
                                              int flags) VALKEYMODULE_ATTR;
 
+typedef void *ValkeyModuleClient;
+
+/// Return the client's argv / argc
+VALKEYMODULE_API const ValkeyModuleString **(*ValkeyModule_GetClientCommandArgs)(ValkeyModuleClient *client,
+                                                                                 int *count)VALKEYMODULE_ATTR;
+
+/// Replace command by name
+VALKEYMODULE_API void *(*ValkeyModule_ReplaceCommand)(const char *cmdname, void *cmdfunc)VALKEYMODULE_ATTR;
+
+VALKEYMODULE_API void (*ValkeyModule_SendReplyOk)(ValkeyModuleClient *c) VALKEYMODULE_ATTR;
+VALKEYMODULE_API void (*ValkeyModule_SendReplyBulkCString)(ValkeyModuleClient *c, const char *data, size_t len) VALKEYMODULE_ATTR;
+VALKEYMODULE_API void (*ValkeyModule_SendReplyNull)(ValkeyModuleClient *c) VALKEYMODULE_ATTR;
+VALKEYMODULE_API void (*ValkeyModule_SendReplyError)(ValkeyModuleClient *c, const char *data) VALKEYMODULE_ATTR;
+
 #define ValkeyModule_IsAOFClient(id) ((id) == UINT64_MAX)
 
 /* This is included inline inside each Valkey module. */
@@ -2015,6 +2029,12 @@ static int ValkeyModule_Init(ValkeyModuleCtx *ctx, const char *name, int ver, in
     VALKEYMODULE_GET_API(RdbStreamFree);
     VALKEYMODULE_GET_API(RdbLoad);
     VALKEYMODULE_GET_API(RdbSave);
+    VALKEYMODULE_GET_API(GetClientCommandArgs);
+    VALKEYMODULE_GET_API(ReplaceCommand);
+    VALKEYMODULE_GET_API(SendReplyOk);
+    VALKEYMODULE_GET_API(SendReplyBulkCString);
+    VALKEYMODULE_GET_API(SendReplyNull);
+    VALKEYMODULE_GET_API(SendReplyError);
 
     if (ValkeyModule_IsModuleNameBusy && ValkeyModule_IsModuleNameBusy(name)) return VALKEYMODULE_ERR;
     ValkeyModule_SetModuleAttribs(ctx, name, ver, apiver);

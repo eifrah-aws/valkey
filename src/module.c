@@ -13538,6 +13538,54 @@ int VM_GetDbIdFromDefragCtx(ValkeyModuleDefragCtx *ctx) {
     return ctx->dbid;
 }
 
+/* Returns the database id of the key currently being processed.
+ * There is no guarantee that this info is always available, so this may return -1.
+ */
+const ValkeyModuleString **VM_GetClientCommandArgs(void *clnt, int *argc) {
+    client *c = (client *)clnt;
+    *argc = c->argc;
+    return (const ValkeyModuleString **)c->argv;
+}
+
+extern struct serverCommand serverCommandTable[];
+
+void *VM_ReplaceCommand(const char *cmdname, void *cmdfunc) {
+    int j;
+    struct serverCommand *c;
+
+    for (j = 0;; j++) {
+        c = serverCommandTable + j;
+        if (c->declared_name == NULL) {
+            // end of table
+            break;
+        }
+
+        if (c->fullname && strcmp(c->fullname, cmdname) == 0) {
+            serverCommandProc *oldCommand = c->proc;
+            c->proc = (serverCommandProc *)cmdfunc;
+            return (void *)oldCommand;
+        }
+    }
+    return NULL;
+}
+
+void VM_SendReplyOk(void *c) {
+    addReplyStatus((client *)c, "OK");
+}
+
+void VM_SendReplyNull(void *c) {
+    addReplyNull((client *)c);
+}
+
+void VM_SendReplyBulkCString(void *c, const char *data, size_t len) {
+    (void)len;
+    addReplyBulkCString((client *)c, data);
+}
+
+void VM_SendReplyError(void *c, const char *errmsg) {
+    addReplyError((client *)c, errmsg);
+}
+
 /* Register all the APIs we export. Keep this function at the end of the
  * file so that's easy to seek it to add new entries. */
 void moduleRegisterCoreAPI(void) {
@@ -13901,4 +13949,10 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(RdbStreamFree);
     REGISTER_API(RdbLoad);
     REGISTER_API(RdbSave);
+    REGISTER_API(GetClientCommandArgs);
+    REGISTER_API(ReplaceCommand);
+    REGISTER_API(SendReplyOk);
+    REGISTER_API(SendReplyNull);
+    REGISTER_API(SendReplyBulkCString);
+    REGISTER_API(SendReplyError);
 }

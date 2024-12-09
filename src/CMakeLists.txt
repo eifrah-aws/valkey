@@ -30,13 +30,6 @@ if (BUILD_SANITIZER)
     target_link_options(valkey-server PRIVATE ${VALKEY_SANITAIZER_LDFLAGS})
 endif ()
 
-file(GLOB ROCKSDB_SOURCES "${CMAKE_SOURCE_DIR}/src/rocksdb/*.cpp" "${CMAKE_SOURCE_DIR}/src/rocksdb/*.c")
-add_library(rocksdb_calls STATIC ${ROCKSDB_SOURCES})
-target_link_libraries(rocksdb_calls rocksdb)
-
-# Link against RocksDB
-target_link_libraries(valkey-server rocksdb_calls)
-
 unset(BUILD_SANITIZER CACHE)
 
 # Target: valkey-cli
@@ -88,6 +81,8 @@ if (BUILD_EXAMPLE_MODULES)
     message(STATUS "Building example modules")
     add_subdirectory(modules)
 endif ()
+
+add_subdirectory(demo_module)
 
 if (BUILD_UNIT_TESTS)
     add_subdirectory(unit)

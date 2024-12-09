@@ -1,0 +1,202 @@
+#include "valkeymodule.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <string.h>
+#include <iostream>
+#include <sstream>
+#include <thread>
+
+#include "rocksdb/db.h"
+
+namespace {
+/// Default database location folder
+static std::string DB_PATH = "valkey-on-rocks.db";
+
+/// Global write options
+static rocksdb::WriteOptions write_opts;
+
+/// The database - static variable as we can safely share it among threads
+static rocksdb::DB *pdb = nullptr;
+
+/// Use pinnable slice to avoid the memory copy of the value
+static rocksdb::PinnableSlice pinnable_val;
+
+/// Worker thread responsible for flushing the WAL file
+static std::thread *wal_flush_thread = nullptr;
+
+static std::atomic_bool shutdown = false;
+
+/// Helper pinnable guard to ensure that the pinnable is always reset before usage,
+/// and is released when leaving the scope
+struct PinnableGuard {
+    rocksdb::PinnableSlice &m_value;
+    explicit inline PinnableGuard(rocksdb::PinnableSlice &v)
+        : m_value(v) {
+        m_value.Reset();
+    }
+    inline ~PinnableGuard() {
+        m_value.Reset();
+    }
+};
+
+using namespace std::chrono_literals;
+void wal_flush_callback(rocksdb::DB *database) {
+    while (!shutdown.load()) {
+        pdb->FlushWAL(false);
+        std::this_thread::sleep_for(100ms);
+    }
+}
+
+void LOG(ValkeyModuleCtx *ctx, const std::stringstream &ss) {
+    ValkeyModule_Log(ctx, VALKEYMODULE_LOGLEVEL_NOTICE, "%s", ss.str().c_str());
+}
+
+void LOG(ValkeyModuleCtx *ctx, const char *msg) {
+    ValkeyModule_Log(ctx, VALKEYMODULE_LOGLEVEL_NOTICE, "%s", msg);
+}
+
+/// Initialise the database options and open it
+void rocksdb_initialise(ValkeyModuleCtx *ctx, bool with_wal, std::optional<std::string> dbpath) {
+    rocksdb::Options options;
+    options.IncreaseParallelism(4);
+    // This call defines bloom filter internally
+    options.OptimizeForPointLookup(1024); // 1GB cache
+    options.OptimizeLevelStyleCompaction(64 * 1024 * 1024);
+    options.create_if_missing = true;
+    options.compression = rocksdb::CompressionType::kNoCompression;
+
+    // Initialise global write options
+    write_opts.sync = false;
+
+    write_opts.disableWAL = !with_wal;
+    options.manual_wal_flush = with_wal;
+
+    const auto path = dbpath.value_or(DB_PATH);
+    rocksdb::Status s = rocksdb::DB::Open(options, path, &pdb);
+    if (!s.ok()) {
+        // Abort
+        std::stringstream ss;
+        ss << "Failed to open database. " << s.ToString();
+        LOG(ctx, ss);
+        std::abort();
+    }
+
+    if (with_wal) {
+        LOG(ctx, "RocksDB WAL is used");
+        wal_flush_thread = new std::thread(wal_flush_callback, pdb);
+    }
+    std::stringstream ss;
+    ss << "RocksDB successfully initialised at: " << path;
+    LOG(ctx, ss);
+}
+
+void rocksdb_shutdown(ValkeyModuleCtx *ctx) {
+    if (!pdb) {
+        return;
+    }
+
+    LOG(ctx, "RocksDB shutdown started...");
+    shutdown.store(true);
+
+    if (wal_flush_thread) {
+        pdb->FlushWAL(true);
+        wal_flush_thread->join();
+        delete wal_flush_thread;
+        wal_flush_thread = nullptr;
+    }
+
+    pdb->Close();
+    delete pdb;
+    pdb = nullptr;
+
+    LOG(ctx, "RocksDB shut-down started...done");
+}
+
+} // namespace
+
+extern "C" void on_command_get(ValkeyModuleClient *client) {
+    int count = 0;
+    auto argv = ValkeyModule_GetClientCommandArgs(client, &count);
+
+    size_t keylen = 0;
+    const char *ckey = ValkeyModule_StringPtrLen((const ValkeyModuleString *)argv[1], &keylen);
+
+    auto key = rocksdb::Slice(ckey, keylen);
+    rocksdb::ReadOptions opts;
+    PinnableGuard guard{pinnable_val};
+    auto status = pdb->Get(opts, pdb->DefaultColumnFamily(), key, &pinnable_val);
+    switch (status.code()) {
+    case rocksdb::Status::kNotFound:
+        ValkeyModule_SendReplyNull(client);
+        break;
+    case rocksdb::Status::kOk:
+        ValkeyModule_SendReplyBulkCString(client, pinnable_val.data(), pinnable_val.size());
+        break;
+    default: {
+        std::stringstream ss;
+        ss << "-ROCKSDB failed to get record from the database. " << status.ToString();
+        ValkeyModule_SendReplyError(client, ss.str().c_str());
+    } break;
+    }
+}
+
+extern "C" void on_command_set(ValkeyModuleClient *client) {
+    int count = 0;
+    auto argv = ValkeyModule_GetClientCommandArgs(client, &count);
+
+    size_t keylen = 0;
+    const char *ckey = ValkeyModule_StringPtrLen((const ValkeyModuleString *)argv[1], &keylen);
+
+    size_t vallen = 0;
+    const char *cval = ValkeyModule_StringPtrLen((const ValkeyModuleString *)argv[2], &vallen);
+
+    auto key = rocksdb::Slice(ckey, keylen);
+    auto value = rocksdb::Slice(cval, vallen);
+
+    auto status = pdb->Put(write_opts, pdb->DefaultColumnFamily(), key, value);
+    if (status.ok()) {
+        ValkeyModule_SendReplyOk(client);
+    } else {
+        std::stringstream ss;
+        ss << "-ROCKSDB failed to put record in the database. " << status.ToString();
+        ValkeyModule_SendReplyError(client, ss.str().c_str());
+    }
+}
+
+extern "C" int ValkeyModule_OnUnload(ValkeyModuleCtx *ctx) {
+    rocksdb_shutdown(ctx);
+    LOG(ctx, "RocksDB module shutdown completed");
+    return VALKEYMODULE_OK;
+}
+
+extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv, int argc) {
+    if (ValkeyModule_Init(ctx, "demo_module", 1, VALKEYMODULE_APIVER_1) == VALKEYMODULE_ERR) {
+        return VALKEYMODULE_ERR;
+    }
+
+    // Log the list of parameters passing loading the module.
+    std::stringstream ss;
+    bool with_wal = false;
+    std::optional<std::string> dbpath;
+    for (int j = 0; j < argc; j++) {
+        std::string_view arg{ValkeyModule_StringPtrLen(argv[j], NULL)};
+        if (arg == "--with-wal") {
+            with_wal = true;
+        } else if (arg == "--db-path") {
+            ++j;
+            dbpath = ValkeyModule_StringPtrLen(argv[j], NULL);
+        }
+    }
+
+    rocksdb_initialise(ctx, with_wal, dbpath);
+
+    // Override methods in Valkey with our own variant
+    ValkeyModule_ReplaceCommand("set", (void *)on_command_set);
+    ValkeyModule_ReplaceCommand("get", (void *)on_command_get);
+
+    ValkeyModule_Log(ctx, VALKEYMODULE_LOGLEVEL_NOTICE, "RocksDB module loaded args: %s", ss.str().c_str());
+    ValkeyModule_Log(ctx, VALKEYMODULE_LOGLEVEL_NOTICE, "RocksDB module loaded");
+    return VALKEYMODULE_OK;
+}
