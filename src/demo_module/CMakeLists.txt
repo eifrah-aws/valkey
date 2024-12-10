@@ -13,3 +13,9 @@ if (APPLE)
     # Some symbols can only be resolved during runtime (they exist in the executable)
     target_link_options(${MODULE_NAME} PRIVATE -undefined dynamic_lookup)
 endif ()
+
+install(
+    TARGETS ${MODULE_NAME}
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    PERMISSIONS ${VALKEY_EXE_PERMISSIONS}
+    COMPONENT "valkey")
