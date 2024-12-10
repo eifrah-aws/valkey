@@ -14,6 +14,11 @@ if (APPLE)
     target_link_options(${MODULE_NAME} PRIVATE -undefined dynamic_lookup)
 endif ()
 
+if (VALKEY_RELEASE_BUILD)
+    # Enable LTO for Release build
+    set_property(TARGET ${MODULE_NAME} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+endif ()
+
 install(
     TARGETS ${MODULE_NAME}
     DESTINATION ${CMAKE_INSTALL_BINDIR}
