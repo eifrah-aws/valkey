@@ -199,7 +199,9 @@ extern "C" void on_command_get(ValkeyModuleClientPtr client) {
 
 extern "C" void on_command_set(ValkeyModuleClientPtr *client) {
     VALKEY_INSTALL_COMMAND_CONTEXT();
-    context->calls++;
+
+    // We could choose to call here to original callback
+    // ((CallbackFuncPtr)context->orig_proc)(client);
 
     int count = 0;
     auto argv = ValkeyModule_GetClientCommandArgs(client, &count);
@@ -236,6 +238,7 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **ar
 
     // Log the list of parameters passing loading the module.
     std::stringstream ss;
+    ss << "RocksDB module loaded args: ";
     bool with_wal = false;
     std::optional<std::string> dbpath;
     for (int j = 0; j < argc; j++) {
@@ -246,15 +249,15 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **ar
             ++j;
             dbpath = ValkeyModule_StringPtrLen(argv[j], NULL);
         }
+        ss << arg << " ";
     }
-
     rocksdb_initialise(ctx, with_wal, dbpath);
 
     // Override methods in Valkey with our own variant
     InstallCallback("set", (void *)on_command_set);
     InstallCallback("get", (void *)on_command_get);
 
-    ValkeyModule_Log(ctx, VALKEYMODULE_LOGLEVEL_NOTICE, "RocksDB module loaded args: %s", ss.str().c_str());
-    ValkeyModule_Log(ctx, VALKEYMODULE_LOGLEVEL_NOTICE, "RocksDB module loaded");
+    LOG(ctx, ss);
+    LOG(ctx, "RocksDB module loaded");
     return VALKEYMODULE_OK;
 }
