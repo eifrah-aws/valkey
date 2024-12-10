@@ -7,10 +7,15 @@
 #include <iostream>
 #include <sstream>
 #include <thread>
+#include <array>
 
 #include "rocksdb/db.h"
 
 namespace {
+
+/// Function callback signature
+typedef void (*CallbackFuncPtr)(ValkeyModuleClientPtr);
+
 /// Default database location folder
 static std::string DB_PATH = "valkey-on-rocks.db";
 
@@ -41,7 +46,31 @@ struct PinnableGuard {
     }
 };
 
+struct CommandContext {
+    void *orig_proc = nullptr;
+    size_t calls = 0;
+};
+
+/// Fixed array that holds pointers to a command context. A function may access this context during execution to
+/// collect data
+constexpr size_t CONTEXT_SIZE = 500;
+static CommandContext *CONTEXT_ARR[CONTEXT_SIZE];
+static size_t next_context_idx = 0;
+
 using namespace std::chrono_literals;
+
+#define VALKEY_INSTALL_COMMAND_CONTEXT()                                      \
+    /* Cast the pointer back to the wrapper struct */                         \
+    static CommandContext *context = nullptr;                                 \
+    if (context == nullptr) {                                                 \
+        CommandContext *wrapper = reinterpret_cast<CommandContext *>(client); \
+        context = wrapper;                                                    \
+        return;                                                               \
+    }
+
+/// The WAL worker thread. Periodically flush the WAL content to disk
+/// in a constant intervals of 100ms. This guarantees that in case of crash
+/// we will lose the data of the last 100ms (maximum)
 void wal_flush_callback(rocksdb::DB *database) {
     while (!shutdown.load()) {
         pdb->FlushWAL(false);
@@ -49,6 +78,29 @@ void wal_flush_callback(rocksdb::DB *database) {
     }
 }
 
+size_t AllocateContextIndex() {
+    if (next_context_idx >= CONTEXT_SIZE) {
+        return (size_t)-1;
+    }
+    return next_context_idx++;
+}
+
+/// Helper method that replaces Valkey command represented by "name"
+/// by a new pointer `funcptr`. In addition, this function initialises the function context structure.
+/// This is done by calling the new callback function (`funcptr`) with the context object.
+void InstallCallback(std::string_view name, void *funcptr) {
+    size_t context_index = AllocateContextIndex();
+    auto context = new CommandContext();
+    CONTEXT_ARR[context_index] = context;
+    auto orig_func = ValkeyModule_ReplaceCommand(name.data(), funcptr);
+    context->orig_proc = orig_func;
+
+    // Call the **new** method once - with the context, this will be stored in the callback
+    // thread-local static storage and can be used in later calls
+    ((CallbackFuncPtr)funcptr)(context);
+}
+
+/// Logging API
 void LOG(ValkeyModuleCtx *ctx, const std::stringstream &ss) {
     ValkeyModule_Log(ctx, VALKEYMODULE_LOGLEVEL_NOTICE, "%s", ss.str().c_str());
 }
@@ -116,7 +168,10 @@ void rocksdb_shutdown(ValkeyModuleCtx *ctx) {
 
 } // namespace
 
-extern "C" void on_command_get(ValkeyModuleClient *client) {
+extern "C" void on_command_get(ValkeyModuleClientPtr client) {
+    VALKEY_INSTALL_COMMAND_CONTEXT();
+    context->calls++;
+
     int count = 0;
     auto argv = ValkeyModule_GetClientCommandArgs(client, &count);
 
@@ -142,7 +197,10 @@ extern "C" void on_command_get(ValkeyModuleClient *client) {
     }
 }
 
-extern "C" void on_command_set(ValkeyModuleClient *client) {
+extern "C" void on_command_set(ValkeyModuleClientPtr *client) {
+    VALKEY_INSTALL_COMMAND_CONTEXT();
+    context->calls++;
+
     int count = 0;
     auto argv = ValkeyModule_GetClientCommandArgs(client, &count);
 
@@ -193,8 +251,8 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **ar
     rocksdb_initialise(ctx, with_wal, dbpath);
 
     // Override methods in Valkey with our own variant
-    ValkeyModule_ReplaceCommand("set", (void *)on_command_set);
-    ValkeyModule_ReplaceCommand("get", (void *)on_command_get);
+    InstallCallback("set", (void *)on_command_set);
+    InstallCallback("get", (void *)on_command_get);
 
     ValkeyModule_Log(ctx, VALKEYMODULE_LOGLEVEL_NOTICE, "RocksDB module loaded args: %s", ss.str().c_str());
     ValkeyModule_Log(ctx, VALKEYMODULE_LOGLEVEL_NOTICE, "RocksDB module loaded");

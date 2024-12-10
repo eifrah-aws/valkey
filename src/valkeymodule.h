@@ -1649,19 +1649,19 @@ VALKEYMODULE_API int (*ValkeyModule_RdbSave)(ValkeyModuleCtx *ctx,
                                              ValkeyModuleRdbStream *stream,
                                              int flags) VALKEYMODULE_ATTR;
 
-typedef void *ValkeyModuleClient;
+typedef void *ValkeyModuleClientPtr;
 
 /// Return the client's argv / argc
-VALKEYMODULE_API const ValkeyModuleString **(*ValkeyModule_GetClientCommandArgs)(ValkeyModuleClient *client,
+VALKEYMODULE_API const ValkeyModuleString **(*ValkeyModule_GetClientCommandArgs)(ValkeyModuleClientPtr client,
                                                                                  int *count)VALKEYMODULE_ATTR;
 
 /// Replace command by name
 VALKEYMODULE_API void *(*ValkeyModule_ReplaceCommand)(const char *cmdname, void *cmdfunc)VALKEYMODULE_ATTR;
 
-VALKEYMODULE_API void (*ValkeyModule_SendReplyOk)(ValkeyModuleClient *c) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SendReplyBulkCString)(ValkeyModuleClient *c, const char *data, size_t len) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SendReplyNull)(ValkeyModuleClient *c) VALKEYMODULE_ATTR;
-VALKEYMODULE_API void (*ValkeyModule_SendReplyError)(ValkeyModuleClient *c, const char *data) VALKEYMODULE_ATTR;
+VALKEYMODULE_API void (*ValkeyModule_SendReplyOk)(ValkeyModuleClientPtr c) VALKEYMODULE_ATTR;
+VALKEYMODULE_API void (*ValkeyModule_SendReplyBulkCString)(ValkeyModuleClientPtr c, const char *data, size_t len) VALKEYMODULE_ATTR;
+VALKEYMODULE_API void (*ValkeyModule_SendReplyNull)(ValkeyModuleClientPtr c) VALKEYMODULE_ATTR;
+VALKEYMODULE_API void (*ValkeyModule_SendReplyError)(ValkeyModuleClientPtr c, const char *data) VALKEYMODULE_ATTR;
 
 #define ValkeyModule_IsAOFClient(id) ((id) == UINT64_MAX)
 
