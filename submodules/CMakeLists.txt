@@ -20,3 +20,8 @@ set(WITH_TOOLS
     OFF
     CACHE BOOL "Build tools")
 add_subdirectory(rocksdb)
+
+if (UNIX AND NOT APPLE)
+    target_compile_options(rocksdb PRIVATE -fPIC)
+endif ()
+
