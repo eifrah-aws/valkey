@@ -13549,6 +13549,9 @@ const ValkeyModuleString **VM_GetClientCommandArgs(void *clnt, int *argc) {
 
 extern struct serverCommand serverCommandTable[];
 
+/// For demo purpose: this is no far from being efficient, but it works:
+/// Search for `cmdname` and replace the pointer with `cmdfunc`.
+/// Return the old pointer to the caller
 void *VM_ReplaceCommand(const char *cmdname, void *cmdfunc) {
     int j;
     struct serverCommand *c;
