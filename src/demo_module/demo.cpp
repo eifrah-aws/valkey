@@ -10,6 +10,8 @@
 #include <array>
 
 #include "rocksdb/db.h"
+#include "rocksdb/table.h"
+#include "rocksdb/filter_policy.h"
 
 namespace {
 
@@ -110,20 +112,25 @@ void LOG(ValkeyModuleCtx *ctx, const char *msg) {
 }
 
 /// Initialise the database options and open it
-void rocksdb_initialise(ValkeyModuleCtx *ctx, bool with_wal, std::optional<std::string> dbpath) {
+void rocksdb_initialise(ValkeyModuleCtx *ctx, bool enable_wal, size_t block_cache_mb, std::optional<std::string> dbpath) {
     rocksdb::Options options;
-    options.IncreaseParallelism(4);
-    // This call defines bloom filter internally
-    options.OptimizeForPointLookup(1024); // 1GB cache
-    options.OptimizeLevelStyleCompaction(64 * 1024 * 1024);
+
+    // Block cache for caching pages from the disk
+    rocksdb::BlockBasedTableOptions table_options;
+    table_options.block_cache = rocksdb::NewLRUCache(block_cache_mb);
+    auto factory = rocksdb::NewBlockBasedTableFactory(table_options);
+    options.table_factory.reset(factory);
+
+    // BF for better reading
+    table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10, false));
     options.create_if_missing = true;
     options.compression = rocksdb::CompressionType::kNoCompression;
 
     // Initialise global write options
     write_opts.sync = false;
 
-    write_opts.disableWAL = !with_wal;
-    options.manual_wal_flush = with_wal;
+    write_opts.disableWAL = !enable_wal;
+    options.manual_wal_flush = enable_wal;
 
     const auto path = dbpath.value_or(DB_PATH);
     rocksdb::Status s = rocksdb::DB::Open(options, path, &pdb);
@@ -135,7 +142,7 @@ void rocksdb_initialise(ValkeyModuleCtx *ctx, bool with_wal, std::optional<std::
         std::abort();
     }
 
-    if (with_wal) {
+    if (enable_wal) {
         LOG(ctx, "RocksDB WAL is used");
         wal_flush_thread = new std::thread(wal_flush_callback, pdb);
     }
@@ -241,6 +248,7 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **ar
     ss << "RocksDB module loaded args: ";
     bool with_wal = false;
     std::optional<std::string> dbpath;
+    std::optional<size_t> block_cache_mb;
     for (int j = 0; j < argc; j++) {
         std::string_view arg{ValkeyModule_StringPtrLen(argv[j], NULL)};
         if (arg == "--with-wal") {
@@ -248,16 +256,29 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **ar
         } else if (arg == "--db-path") {
             ++j;
             dbpath = ValkeyModule_StringPtrLen(argv[j], NULL);
+        } else if (arg == "--block-cache") {
+            ++j;
+            const char *n = ValkeyModule_StringPtrLen(argv[j], NULL);
+            block_cache_mb = std::atol(n);
         }
         ss << arg << " ";
     }
-    rocksdb_initialise(ctx, with_wal, dbpath);
+    LOG(ctx, ss);
+
+    // If not provided, use 64mb of block cache
+    ss.clear();
+    ss << "RocksDB cache: " << block_cache_mb.value_or(64) << "mb";
+    LOG(ctx, ss);
+
+    ss << "WAL enabled: " << with_wal;
+    LOG(ctx, ss);
+
+    rocksdb_initialise(ctx, with_wal, block_cache_mb.value_or(64), dbpath);
 
     // Override methods in Valkey with our own variant
     InstallCallback("set", (void *)on_command_set);
     InstallCallback("get", (void *)on_command_get);
 
-    LOG(ctx, ss);
     LOG(ctx, "RocksDB module loaded");
     return VALKEYMODULE_OK;
 }
