@@ -266,10 +266,11 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **ar
     LOG(ctx, ss);
 
     // If not provided, use 64mb of block cache
-    ss.clear();
+    ss = {};
     ss << "RocksDB cache: " << block_cache_mb.value_or(64) << "mb";
     LOG(ctx, ss);
 
+    ss = {};
     ss << "WAL enabled: " << with_wal;
     LOG(ctx, ss);
 
