@@ -117,7 +117,7 @@ void rocksdb_initialise(ValkeyModuleCtx *ctx, bool enable_wal, size_t block_cach
 
     // Block cache for caching pages from the disk
     rocksdb::BlockBasedTableOptions table_options;
-    table_options.block_cache = rocksdb::NewLRUCache(block_cache_mb);
+    table_options.block_cache = rocksdb::NewLRUCache(block_cache_mb * 1024 * 1024);
     auto factory = rocksdb::NewBlockBasedTableFactory(table_options);
     options.table_factory.reset(factory);
 
