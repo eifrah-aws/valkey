@@ -245,7 +245,6 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **ar
 
     // Log the list of parameters passing loading the module.
     std::stringstream ss;
-    ss << "RocksDB module loaded args: ";
     bool with_wal = false;
     std::optional<std::string> dbpath;
     std::optional<size_t> block_cache_mb;
@@ -263,7 +262,6 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **ar
         }
         ss << arg << " ";
     }
-    LOG(ctx, ss);
 
     // If not provided, use 64mb of block cache
     ss = {};
