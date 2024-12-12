@@ -126,6 +126,10 @@ void rocksdb_initialise(ValkeyModuleCtx *ctx, bool enable_wal, size_t block_cach
     options.create_if_missing = true;
     options.compression = rocksdb::CompressionType::kNoCompression;
 
+    // Blobbing
+    options.enable_blob_files = true;
+    options.min_blob_size = 1024; // 1K and above should be stored separately
+
     // Direct I/O should affect writes only
     options.use_direct_io_for_flush_and_compaction = direct_io;
 
