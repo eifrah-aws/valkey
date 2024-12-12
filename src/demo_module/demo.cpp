@@ -112,7 +112,7 @@ void LOG(ValkeyModuleCtx *ctx, const char *msg) {
 }
 
 /// Initialise the database options and open it
-void rocksdb_initialise(ValkeyModuleCtx *ctx, bool enable_wal, size_t block_cache_mb, std::optional<std::string> dbpath) {
+void rocksdb_initialise(ValkeyModuleCtx *ctx, bool enable_wal, size_t block_cache_mb, bool direct_io, std::optional<std::string> dbpath) {
     rocksdb::Options options;
 
     // Block cache for caching pages from the disk
@@ -125,6 +125,9 @@ void rocksdb_initialise(ValkeyModuleCtx *ctx, bool enable_wal, size_t block_cach
     table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10, false));
     options.create_if_missing = true;
     options.compression = rocksdb::CompressionType::kNoCompression;
+
+    options.use_direct_reads = direct_io;
+    options.use_direct_io_for_flush_and_compaction = direct_io;
 
     // Initialise global write options
     write_opts.sync = false;
@@ -248,6 +251,7 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **ar
     bool with_wal = false;
     std::optional<std::string> dbpath;
     std::optional<size_t> block_cache_mb;
+    bool direct_io = false;
     for (int j = 0; j < argc; j++) {
         std::string_view arg{ValkeyModule_StringPtrLen(argv[j], NULL)};
         if (arg == "--with-wal") {
@@ -259,6 +263,8 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **ar
             ++j;
             const char *n = ValkeyModule_StringPtrLen(argv[j], NULL);
             block_cache_mb = std::atol(n);
+        } else if (arg == "--direct-io") {
+            direct_io = true;
         }
         ss << arg << " ";
     }
@@ -272,7 +278,11 @@ extern "C" int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **ar
     ss << "WAL enabled: " << with_wal;
     LOG(ctx, ss);
 
-    rocksdb_initialise(ctx, with_wal, block_cache_mb.value_or(64), dbpath);
+    ss = {};
+    ss << "Using direct I/O: " << direct_io;
+    LOG(ctx, ss);
+
+    rocksdb_initialise(ctx, with_wal, block_cache_mb.value_or(64), direct_io, dbpath);
 
     // Override methods in Valkey with our own variant
     InstallCallback("set", (void *)on_command_set);
