@@ -132,7 +132,7 @@ void rocksdb_initialise(ValkeyModuleCtx *ctx, bool enable_wal, size_t block_cach
     // These parameters are suppose to reduce write-stalls
     options.write_buffer_size = 128 << 20; // 128MB per memtable
     options.max_write_buffer_number = 4;   // 4 memtables pending to be flush
-    options.max_background_jobs = 5;       // 1 for compaction 4 for flushing memtables
+    options.IncreaseParallelism(4);
 
     // Initialise global write options
     write_opts.sync = false;
