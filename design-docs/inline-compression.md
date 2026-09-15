@@ -1,6 +1,5 @@
 # Inline In-memory Compression for Valkey — Design Summary
 
-_A short version for a 30-minute talk. Full detail: `merged-design.md`._
 _Issue: [valkey-io/valkey #3423](https://github.com/valkey-io/valkey/issues/3423)_
 
 _Note on wording: "compression dictionary" always means the trained block of sample bytes used by the compressor. It is never a Valkey `dict` (hashtable)._
@@ -208,29 +207,40 @@ Wasted work is bounded at `K` per compressed lifetime. The counter lives in the 
 
 ## 7. The algorithm is replaceable
 
-The compression library is never called directly. One small vtable:
+The compression library is never called directly. `src/compressor_alg.h` holds three objects:
+
+| Object | What it is |
+|---|---|
+| `compressorApi` | The compression function table. Every entry calls straight into a backend library. Shared, constant, never allocated. |
+| `compressorConfig` | The value size range the operator asked for. |
+| `compressorAlg` | What callers hold. Built by `newCompressor()`, released by `freeCompressor()`. Carries the function table, the plain data, and the backend's private scratch. |
 
 ```c
-typedef struct compressor {
-    const char *name;
-    void *(*ctx_new)(void);
-    void  (*ctx_free)(void *ctx);
-    int    (*train)(void *ctx, const void *samples, const size_t *sizes, unsigned n,
-                    void *dict_out, size_t dict_cap);
+typedef struct compressorApi {
+    int    (*state_new)(compressorAlg *instance);
+    void   (*state_free)(compressorAlg *instance);
+    int    (*train)(compressorAlg *instance, const void *samples, const size_t *sizes,
+                    unsigned n, void *dict_out, size_t dict_cap);
     void  *(*dict_load)(const void *dict_buf, size_t len);
     void   (*dict_free)(void *cdict);
-    size_t (*compress_bound)(size_t srclen);
-    size_t (*compress)(void *ctx, void *cdict, const void *src, size_t srclen,
-                       void *dst, size_t dstcap);
-    size_t (*decompress)(void *ctx, void *cdict, const void *body, size_t body_len,
-                         void *dst, size_t dstcap);
-    void   (*release)(void *ctx, void *cdict);
-    int         (*last_error)(void *ctx);
-    const char *(*strerror)(int err);
-} compressor;
+    size_t (*lib_max_output_size)(size_t input_len);
+    size_t (*compress)(compressorAlg *instance, void *cdict, const void *src,
+                       size_t srclen, void *dst, size_t dstcap);
+    size_t (*decompress)(compressorAlg *instance, void *cdict, const void *body,
+                         size_t body_len, void *dst, size_t dstcap);
+    void   (*release)(compressorAlg *instance, void *cdict);
+} compressorApi;
 ```
 
-Two shapes here are deliberate. **The caller allocates the destination**, which is what makes the one-allocation build in §5.4 possible. And **`cdict` is an argument, not state inside `ctx`**, because several compression dictionaries are live at once (§4) — a worker may compress with the active one while the main thread decompresses a frame built with a retiring one.
+Three shapes here are deliberate.
+
+**The caller allocates the destination**, which is what makes the one-allocation build in §5.4 possible. It asks `instance->max_output_size()` how much room it needs. That function applies the operator's range first, then asks the backend, so the range check exists in one place.
+
+**`cdict` is an argument, not state inside the instance**, because several compression dictionaries are live at once (§4) — a worker may compress with the active one while the main thread decompresses a frame built with a retiring one. A dictionary is read only once `dict_load()` returns, so every thread shares one.
+
+**An instance belongs to one thread and is never shared**, and it never changes after it is built. That is what removes every lock and atomic from this layer. Each worker thread holds one, and the main thread holds one for decompressing on reads. To change a setting, build a new instance and drop the old one.
+
+A failure returns 0, and the code goes into `instance->last_error`. `compressorStrerror()` maps it to text. The codes are shared by all backends, because none of them is specific to one library.
 
 The backend is selected **once, at startup**, from `compression-mode` (§2) — never per dictionary, and never at runtime. Every dictionary this process ever trains, across every retrain, uses that one backend, so a frame's `dict_id` only needs to pick a dictionary version (§4), never an algorithm. That is what deletes frame magic tags and per-frame algorithm detection.
 
