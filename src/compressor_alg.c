@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-/* Building and releasing a compressor instance. The backends themselves live in
+/* Building and releasing a compressorAlg instance. The backends themselves live in
  * compressor_alg_lz4.c and compressor_alg_zstd.c, and this file is the only place
  * that knows which ids map to which function table. */
 
@@ -19,9 +19,9 @@
 extern const compressorApi compressorApiLz4;
 
 /* Applies the operator's range, then asks the backend. This is the function
- * behind compressorInstance.max_output_size, so it is the same for every backend
+ * behind compressorAlg.max_output_size, so it is the same for every backend
  * and the range check exists once. */
-static size_t compressorMaxOutputSize(const compressorInstance *instance, size_t input_len) {
+static size_t compressorMaxOutputSize(const compressorAlg *instance, size_t input_len) {
     assert(instance != NULL);
 
     /* The range the operator asked for. 0 means no limit on that side. */
@@ -32,8 +32,8 @@ static size_t compressorMaxOutputSize(const compressorInstance *instance, size_t
     return instance->api->lib_max_output_size(input_len);
 }
 
-compressorInstance *newCompressor(compressorAlgId id, const compressorConfig *config) {
-    compressorInstance *c = zcalloc(sizeof(*c));
+compressorAlg *newCompressor(compressorAlgId id, const compressorConfig *config) {
+    compressorAlg *c = zcalloc(sizeof(*c));
 
     switch (id) {
     case COMPRESSOR_ALG_LZ4:
@@ -62,7 +62,7 @@ compressorInstance *newCompressor(compressorAlgId id, const compressorConfig *co
     return c;
 }
 
-void freeCompressor(compressorInstance *c) {
+void freeCompressor(compressorAlg *c) {
     if (c == NULL) return;
     c->api->state_free(c);
     zfree(c);

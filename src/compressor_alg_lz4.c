@@ -77,7 +77,7 @@ static LZ4_stream_t *lz4StreamNew(void **buf_out) {
     return stream;
 }
 
-static int lz4StateNew(compressorInstance *instance) {
+static int lz4StateNew(compressorAlg *instance) {
     lz4State *st = zcalloc(sizeof(*st));
     st->cstream = lz4StreamNew(&st->cstream_buf);
     if (st->cstream == NULL) {
@@ -88,7 +88,7 @@ static int lz4StateNew(compressorInstance *instance) {
     return C_OK;
 }
 
-static void lz4StateFree(compressorInstance *instance) {
+static void lz4StateFree(compressorAlg *instance) {
     lz4State *st = instance->state;
     if (st == NULL) return;
     zfree(st->cstream_buf);
@@ -144,7 +144,7 @@ static size_t lz4LibMaxOutputSize(size_t input_len) {
     return (size_t)max_size;
 }
 
-static size_t lz4Compress(compressorInstance *instance,
+static size_t lz4Compress(compressorAlg *instance,
                           void *cdict,
                           const void *src,
                           size_t srclen,
@@ -186,7 +186,7 @@ static size_t lz4Compress(compressorInstance *instance,
     return (size_t)written;
 }
 
-static size_t lz4Decompress(compressorInstance *instance,
+static size_t lz4Decompress(compressorAlg *instance,
                             void *cdict,
                             const void *body,
                             size_t body_len,

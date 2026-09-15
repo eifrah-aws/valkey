@@ -18,7 +18,7 @@
  *                       Nothing else lives here: no names, no limits, no data.
  *                       Shared, constant, and never allocated.
  *   compressorConfig    What the operator asked for.
- *   compressorInstance  What callers hold. Made by newCompressor(), released by
+ *   compressorAlg       What callers hold. Made by newCompressor(), released by
  *                       freeCompressor(). Holds the function table, all the plain
  *                       data, and the backend's private scratch.
  *
@@ -36,7 +36,7 @@
  * while the process runs. That is why a compressed frame carries no algorithm
  * tag. */
 
-typedef struct compressorInstance compressorInstance;
+typedef struct compressorAlg compressorAlg;
 
 /* The algorithm to compress with. Set once from compression-mode.
  *
@@ -49,7 +49,7 @@ typedef enum {
 } compressorAlgId;
 
 /* Failure codes, shared by every backend. They land in
- * compressorInstance.last_error. The backend libraries report failure with a
+ * compressorAlg.last_error. The backend libraries report failure with a
  * return code and have no error codes of their own, so these are ours.
  *
  * They are shared rather than per backend because none of them is specific to a
@@ -88,8 +88,8 @@ typedef struct compressorApi {
     /* Scratch lifecycle, called by newCompressor() and freeCompressor(). The
      * backend keeps its scratch in instance->state. state_new() returns C_OK or
      * C_ERR. The scratch is private to the instance, so private to one thread. */
-    int (*state_new)(compressorInstance *instance);
-    void (*state_free)(compressorInstance *instance);
+    int (*state_new)(compressorAlg *instance);
+    void (*state_free)(compressorAlg *instance);
 
     /* Trains a dictionary from n samples.
      *
@@ -103,7 +103,7 @@ typedef struct compressorApi {
      * May be NULL. LZ4 has no trainer of its own and its headers say to use
      * Zstandard's dictionary builder instead. A backend without a trainer leaves
      * this NULL, and the dictionary layer supplies the bytes another way. */
-    int (*train)(compressorInstance *instance,
+    int (*train)(compressorAlg *instance,
                  const void *samples,
                  const size_t *sizes,
                  unsigned n,
@@ -131,7 +131,7 @@ typedef struct compressorApi {
      * dst must hold at least instance->max_output_size() bytes. Returns the number of
      * bytes written, or 0 on failure. The caller then shrinks the buffer to that
      * length, because the bound is generous. */
-    size_t (*compress)(compressorInstance *instance,
+    size_t (*compress)(compressorAlg *instance,
                        void *cdict,
                        const void *src,
                        size_t srclen,
@@ -147,7 +147,7 @@ typedef struct compressorApi {
      * Returns the number of bytes written, or 0 on failure. A failure here is our
      * own bug, never bad input, because frames never come from outside the
      * process. The caller asserts. */
-    size_t (*decompress)(compressorInstance *instance,
+    size_t (*decompress)(compressorAlg *instance,
                          void *cdict,
                          const void *body,
                          size_t body_len,
@@ -158,12 +158,12 @@ typedef struct compressorApi {
      * library state it keeps for that frame. The dictionary registry does its own
      * user counting, which is not this hook's job. May be NULL when a backend
      * keeps no per-frame state, which is the case for LZ4. */
-    void (*release)(compressorInstance *instance, void *cdict);
+    void (*release)(compressorAlg *instance, void *cdict);
 } compressorApi;
 
 /* What callers hold. One per thread, never shared. Immutable except for state,
  * which only the backend touches, and last_error. */
-struct compressorInstance {
+struct compressorAlg {
     /* The backend's functions, fixed at construction. */
     const compressorApi *api;
 
@@ -187,10 +187,10 @@ struct compressorInstance {
      * input_len falls outside instance->config, or when the backend itself cannot
      * handle that length. The caller treats both the same way, so it does not need
      * to know which one it was. */
-    size_t (*max_output_size)(const compressorInstance *instance, size_t input_len);
+    size_t (*max_output_size)(const compressorAlg *instance, size_t input_len);
 };
 
-/* Builds a compressor. Returns NULL for COMPRESSOR_ALG_NONE, for an unknown id,
+/* Builds a compressorAlg. Returns NULL for COMPRESSOR_ALG_NONE, for an unknown id,
  * for a backend this build does not include, and on allocation failure.
  * COMPRESSOR_ALG_ZSTD returns NULL until zstd is vendored.
  *
@@ -199,8 +199,8 @@ struct compressorInstance {
  *
  * Each thread that compresses or decompresses calls this once and keeps the
  * result. To change a setting, build a new instance and free the old one. */
-compressorInstance *newCompressor(compressorAlgId id, const compressorConfig *config);
-void freeCompressor(compressorInstance *c);
+compressorAlg *newCompressor(compressorAlgId id, const compressorConfig *config);
+void freeCompressor(compressorAlg *c);
 
 /* Maps a failure code to static text. Never returns NULL. */
 static inline const char *compressorStrerror(int err) {
@@ -210,7 +210,7 @@ static inline const char *compressorStrerror(int err) {
     case COMPRESSOR_ERR_NO_MEMORY: return "out of memory";
     case COMPRESSOR_ERR_COMPRESS: return "compression failed";
     case COMPRESSOR_ERR_DECOMPRESS: return "decompression failed";
-    default: return "unknown compressor error";
+    default: return "unknown compressorAlg error";
     }
 }
 
