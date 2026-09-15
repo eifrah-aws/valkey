@@ -9,8 +9,10 @@
  * that knows which ids map to which function table. */
 
 #include "compressor_alg.h"
+#include "server.h" /* C_OK, C_ERR */
 #include "serverassert.h"
 #include "zmalloc.h"
+#include <strings.h> /* strcasecmp */
 
 /* The function tables, one per compressor_alg_*.c file. Declared here and not in
  * compressor_alg.h, because this is the only file that needs them: everyone else
@@ -56,6 +58,10 @@ compressorAlg *newCompressor(compressorAlgId id, const compressorConfig *config)
     if (config != NULL) c->config = *config;
 
     if (c->api->state_new(c) != C_OK) {
+        /* state_new() may have allocated part of its scratch before it failed, so
+         * give the backend a chance to release it. state_free() must accept a
+         * partly built instance, which is why lz4StateFree() checks for NULL. */
+        c->api->state_free(c);
         zfree(c);
         return NULL;
     }
@@ -66,4 +72,37 @@ void freeCompressor(compressorAlg *c) {
     if (c == NULL) return;
     c->api->state_free(c);
     zfree(c);
+}
+
+const char *compressorStrerror(int err) {
+    switch (err) {
+    case COMPRESSOR_ERR_NONE: return "no error";
+    case COMPRESSOR_ERR_BAD_SIZE: return "value size out of range for this backend";
+    case COMPRESSOR_ERR_COMPRESS: return "compression failed";
+    case COMPRESSOR_ERR_DECOMPRESS: return "decompression failed";
+    default: return "unknown compressor error";
+    }
+}
+
+int compressorAlgIdFromName(const char *name, compressorAlgId *id_out) {
+    if (name == NULL || id_out == NULL) return C_ERR;
+    if (!strcasecmp(name, "off")) {
+        *id_out = COMPRESSOR_ALG_NONE;
+    } else if (!strcasecmp(name, "lz4")) {
+        *id_out = COMPRESSOR_ALG_LZ4;
+    } else if (!strcasecmp(name, "zstd")) {
+        *id_out = COMPRESSOR_ALG_ZSTD;
+    } else {
+        return C_ERR;
+    }
+    return C_OK;
+}
+
+const char *compressorAlgIdName(compressorAlgId id) {
+    switch (id) {
+    case COMPRESSOR_ALG_LZ4: return "lz4";
+    case COMPRESSOR_ALG_ZSTD: return "zstd";
+    case COMPRESSOR_ALG_NONE: return "off";
+    default: return "off";
+    }
 }
