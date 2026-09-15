@@ -65,12 +65,13 @@ typedef struct lz4Dict {
 } lz4Dict;
 
 /* Allocates one LZ4_stream_t through zmalloc and initializes it. Returns NULL on
- * failure, and then *buf_out is untouched. */
+ * failure, and sets *buf_out either way, so the caller can always free it. */
 static LZ4_stream_t *lz4StreamNew(void **buf_out) {
     void *buf = zmalloc(sizeof(LZ4_stream_t));
     LZ4_stream_t *stream = LZ4_initStream(buf, sizeof(LZ4_stream_t));
     if (stream == NULL) {
         zfree(buf);
+        *buf_out = NULL;
         return NULL;
     }
     *buf_out = buf;
@@ -97,7 +98,7 @@ static void lz4StateFree(compressorAlg *instance) {
 }
 
 static void *lz4DictLoad(const void *dict_buf, size_t len) {
-    if (dict_buf == NULL || len == 0) return NULL;
+    if (dict_buf == NULL || len < COMPRESSOR_LZ4_DICT_MIN) return NULL;
 
     /* Keep only the tail LZ4 can actually use. Compression and decompression must
      * see the same bytes, and both read this one copy, so they cannot disagree. */

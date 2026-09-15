@@ -7,9 +7,7 @@
 #ifndef COMPRESSOR_ALG_H
 #define COMPRESSOR_ALG_H
 
-#include "server.h" /* C_OK, C_ERR */
 #include <stddef.h>
-#include <strings.h> /* strcasecmp */
 
 /* There are three objects here.
  *
@@ -57,7 +55,6 @@ typedef enum {
 typedef enum {
     COMPRESSOR_ERR_NONE = 0,
     COMPRESSOR_ERR_BAD_SIZE,   /* length out of range for this backend */
-    COMPRESSOR_ERR_NO_MEMORY,  /* could not allocate */
     COMPRESSOR_ERR_COMPRESS,   /* the library refused to compress */
     COMPRESSOR_ERR_DECOMPRESS, /* the library refused to decompress */
 } compressorErr;
@@ -68,6 +65,15 @@ typedef enum {
  * deps/lz4/lz4.h: "only the last 64 KB are loaded". */
 #define COMPRESSOR_LZ4_DICT_MAX 65536
 #define COMPRESSOR_ZSTD_DICT_MAX 0
+
+/* Smallest dictionary LZ4 can use, in bytes.
+ *
+ * LZ4 drops a dictionary shorter than one hash unit, because it cannot hash it:
+ * see "if (dictSize < (int)HASH_UNIT) return 0;" in LZ4_loadDict_internal() in
+ * deps/lz4/lz4.c. HASH_UNIT is sizeof(reg_t), so 8 bytes on a 64-bit build and 4
+ * on a 32-bit one. We use 8 on every build, so the limit does not change with the
+ * word size. A dictionary that small saves nothing anyway. */
+#define COMPRESSOR_LZ4_DICT_MIN 8
 
 /* What the operator asked for. Copied into an instance and then frozen. */
 typedef struct compressorConfig {
@@ -114,7 +120,11 @@ typedef struct compressorApi {
      *
      * The result is read only and safe to use from several threads at the same
      * time, which is why it takes no instance. It does not borrow dict_buf: the
-     * caller may free dict_buf as soon as this returns. Returns NULL on failure. */
+     * caller may free dict_buf as soon as this returns.
+     *
+     * Returns NULL on failure. A backend may also refuse a length it cannot use:
+     * LZ4 refuses anything under COMPRESSOR_LZ4_DICT_MIN bytes, and keeps only
+     * the last COMPRESSOR_LZ4_DICT_MAX bytes of a longer one. */
     void *(*dict_load)(const void *dict_buf, size_t len);
     void (*dict_free)(void *cdict);
 
@@ -203,42 +213,15 @@ compressorAlg *newCompressor(compressorAlgId id, const compressorConfig *config)
 void freeCompressor(compressorAlg *c);
 
 /* Maps a failure code to static text. Never returns NULL. */
-static inline const char *compressorStrerror(int err) {
-    switch (err) {
-    case COMPRESSOR_ERR_NONE: return "no error";
-    case COMPRESSOR_ERR_BAD_SIZE: return "value size out of range for this backend";
-    case COMPRESSOR_ERR_NO_MEMORY: return "out of memory";
-    case COMPRESSOR_ERR_COMPRESS: return "compression failed";
-    case COMPRESSOR_ERR_DECOMPRESS: return "decompression failed";
-    default: return "unknown compressorAlg error";
-    }
-}
+const char *compressorStrerror(int err);
 
 /* Maps a compression-mode string to an id. Accepts "off", "lz4", and "zstd".
- * Returns C_OK and writes to *id_out, or C_ERR when the name is unknown. */
-static inline int compressorAlgIdFromName(const char *name, compressorAlgId *id_out) {
-    if (name == NULL || id_out == NULL) return C_ERR;
-    if (!strcasecmp(name, "off")) {
-        *id_out = COMPRESSOR_ALG_NONE;
-    } else if (!strcasecmp(name, "lz4")) {
-        *id_out = COMPRESSOR_ALG_LZ4;
-    } else if (!strcasecmp(name, "zstd")) {
-        *id_out = COMPRESSOR_ALG_ZSTD;
-    } else {
-        return C_ERR;
-    }
-    return C_OK;
-}
+ * The comparison ignores case. Returns C_OK and writes to *id_out, or C_ERR when
+ * the name is unknown or an argument is NULL. */
+int compressorAlgIdFromName(const char *name, compressorAlgId *id_out);
 
 /* Static name for an id, for logs and CONFIG GET. Returns "off" for
  * COMPRESSOR_ALG_NONE and never returns NULL. */
-static inline const char *compressorAlgIdName(compressorAlgId id) {
-    switch (id) {
-    case COMPRESSOR_ALG_LZ4: return "lz4";
-    case COMPRESSOR_ALG_ZSTD: return "zstd";
-    case COMPRESSOR_ALG_NONE: return "off";
-    default: return "off";
-    }
-}
+const char *compressorAlgIdName(compressorAlgId id);
 
 #endif /* COMPRESSOR_ALG_H */
