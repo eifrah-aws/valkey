@@ -1,0 +1,244 @@
+/*
+ * Copyright (c) Valkey Contributors
+ * All rights reserved.
+ * SPDX-License-Identifier: BSD-3-Clause
+ */
+
+#ifndef COMPRESSOR_ALG_H
+#define COMPRESSOR_ALG_H
+
+#include "server.h" /* C_OK, C_ERR */
+#include <stddef.h>
+#include <strings.h> /* strcasecmp */
+
+/* There are three objects here.
+ *
+ *   compressorApi       The compression function table. Every entry calls
+ *                       straight into a backend library such as lz4 or zstd.
+ *                       Nothing else lives here: no names, no limits, no data.
+ *                       Shared, constant, and never allocated.
+ *   compressorConfig    What the operator asked for.
+ *   compressorInstance  What callers hold. Made by newCompressor(), released by
+ *                       freeCompressor(). Holds the function table, all the plain
+ *                       data, and the backend's private scratch.
+ *
+ * An instance is immutable apart from its scratch buffer and its error code.
+ * Nothing changes an instance after it is built. A CONFIG SET that touches a
+ * compression setting builds a new instance and drops the old one.
+ *
+ * An instance belongs to one thread and is never shared. That is what keeps the
+ * whole thing free of locks and atomics: each worker thread has its own, and the
+ * main thread has its own for decompressing on reads. Compression dictionaries
+ * are the exception and are shared on purpose, because they are read only once
+ * loaded.
+ *
+ * The backend is picked once at startup from compression-mode and never changes
+ * while the process runs. That is why a compressed frame carries no algorithm
+ * tag. */
+
+typedef struct compressorInstance compressorInstance;
+
+/* The algorithm to compress with. Set once from compression-mode.
+ *
+ * These are separate from compressionAlgo in compression.h. That enum belongs to
+ * stream compression, which is a different feature, and must not be reused. */
+typedef enum {
+    COMPRESSOR_ALG_NONE = 0, /* compression-mode off. No backend is loaded. */
+    COMPRESSOR_ALG_LZ4 = 1,
+    COMPRESSOR_ALG_ZSTD = 2,
+} compressorAlgId;
+
+/* Failure codes, shared by every backend. They land in
+ * compressorInstance.last_error. The backend libraries report failure with a
+ * return code and have no error codes of their own, so these are ours.
+ *
+ * They are shared rather than per backend because none of them is specific to a
+ * library, and one shared list means one place to map a code to text. */
+typedef enum {
+    COMPRESSOR_ERR_NONE = 0,
+    COMPRESSOR_ERR_BAD_SIZE,   /* length out of range for this backend */
+    COMPRESSOR_ERR_NO_MEMORY,  /* could not allocate */
+    COMPRESSOR_ERR_COMPRESS,   /* the library refused to compress */
+    COMPRESSOR_ERR_DECOMPRESS, /* the library refused to decompress */
+} compressorErr;
+
+/* Largest dictionary each backend can use, in bytes. 0 means no limit.
+ *
+ * LZ4 references only the last 64 KiB of a dictionary. See LZ4_loadDict() in
+ * deps/lz4/lz4.h: "only the last 64 KB are loaded". */
+#define COMPRESSOR_LZ4_DICT_MAX 65536
+#define COMPRESSOR_ZSTD_DICT_MAX 0
+
+/* What the operator asked for. Copied into an instance and then frozen. */
+typedef struct compressorConfig {
+    size_t min_input_len; /* compression-min-value-size. 0 means no lower limit. */
+    size_t max_input_len; /* compression-max-value-size. 0 means no upper limit. */
+} compressorConfig;
+
+/* The compression function table. One per backend, constant and shared.
+ *
+ * Every entry here is a function that calls into the backend library. Every entry
+ * is required unless the comment says it may be NULL.
+ *
+ * Sizes are size_t. compress() and decompress() return 0 on failure, which is
+ * unambiguous because the caller never passes an empty source: the smallest value
+ * the sweeper accepts is compression-min-value-size, 256 bytes by default. After
+ * a 0 return, read instance->last_error and pass it to compressorStrerror(). */
+typedef struct compressorApi {
+    /* Scratch lifecycle, called by newCompressor() and freeCompressor(). The
+     * backend keeps its scratch in instance->state. state_new() returns C_OK or
+     * C_ERR. The scratch is private to the instance, so private to one thread. */
+    int (*state_new)(compressorInstance *instance);
+    void (*state_free)(compressorInstance *instance);
+
+    /* Trains a dictionary from n samples.
+     *
+     * samples is one buffer holding every sample back to back, with no
+     * separators. sizes[i] is the length of sample i, so the samples are read in
+     * order using those lengths.
+     *
+     * Writes the dictionary into dict_out, which holds dict_cap bytes. Returns
+     * the number of bytes written, or -1 on failure.
+     *
+     * May be NULL. LZ4 has no trainer of its own and its headers say to use
+     * Zstandard's dictionary builder instead. A backend without a trainer leaves
+     * this NULL, and the dictionary layer supplies the bytes another way. */
+    int (*train)(compressorInstance *instance,
+                 const void *samples,
+                 const size_t *sizes,
+                 unsigned n,
+                 void *dict_out,
+                 size_t dict_cap);
+
+    /* Turns raw dictionary bytes into the digested form the library wants.
+     *
+     * The result is read only and safe to use from several threads at the same
+     * time, which is why it takes no instance. It does not borrow dict_buf: the
+     * caller may free dict_buf as soon as this returns. Returns NULL on failure. */
+    void *(*dict_load)(const void *dict_buf, size_t len);
+    void (*dict_free)(void *cdict);
+
+    /* Largest output compress() can produce for input_len input bytes, judged
+     * only against the library's own limits. Returns 0 when the library cannot
+     * handle that length.
+     *
+     * Callers use instance->max_output_size() instead, which also applies the
+     * operator's range. */
+    size_t (*lib_max_output_size)(size_t input_len);
+
+    /* Compresses srclen bytes from src into dst, using cdict.
+     *
+     * dst must hold at least instance->max_output_size() bytes. Returns the number of
+     * bytes written, or 0 on failure. The caller then shrinks the buffer to that
+     * length, because the bound is generous. */
+    size_t (*compress)(compressorInstance *instance,
+                       void *cdict,
+                       const void *src,
+                       size_t srclen,
+                       void *dst,
+                       size_t dstcap);
+
+    /* Decompresses body_len bytes from body into dst, using cdict.
+     *
+     * cdict must be the same dictionary version the frame was built with. The
+     * frame's dict_id field is what selects it. dstcap comes from the frame's
+     * uncompressed_len field, so it is exact.
+     *
+     * Returns the number of bytes written, or 0 on failure. A failure here is our
+     * own bug, never bad input, because frames never come from outside the
+     * process. The caller asserts. */
+    size_t (*decompress)(compressorInstance *instance,
+                         void *cdict,
+                         const void *body,
+                         size_t body_len,
+                         void *dst,
+                         size_t dstcap);
+
+    /* Called when a frame built with cdict is freed, so the backend can drop any
+     * library state it keeps for that frame. The dictionary registry does its own
+     * user counting, which is not this hook's job. May be NULL when a backend
+     * keeps no per-frame state, which is the case for LZ4. */
+    void (*release)(compressorInstance *instance, void *cdict);
+} compressorApi;
+
+/* What callers hold. One per thread, never shared. Immutable except for state,
+ * which only the backend touches, and last_error. */
+struct compressorInstance {
+    /* The backend's functions, fixed at construction. */
+    const compressorApi *api;
+
+    /* Plain data about the backend, copied in at construction. */
+    const char *name;     /* "lz4" or "zstd", for logs and INFO */
+    compressorAlgId id;   /* which backend this is */
+    size_t dict_max_size; /* largest dictionary the backend can use, 0 = no limit */
+    compressorConfig config;
+
+    /* Backend scratch, private to this instance. Only the backend touches it. */
+    void *state;
+
+    /* Code from the last failed call on this instance, else COMPRESSOR_ERR_NONE. */
+    int last_error;
+
+    /* Largest output compress() can produce for input_len input bytes. The caller
+     * uses this to size the destination before compressing. The real output is
+     * almost always much smaller, so the caller must shrink the buffer afterwards.
+     *
+     * Returns 0 when the value must not be compressed at all. That happens when
+     * input_len falls outside instance->config, or when the backend itself cannot
+     * handle that length. The caller treats both the same way, so it does not need
+     * to know which one it was. */
+    size_t (*max_output_size)(const compressorInstance *instance, size_t input_len);
+};
+
+/* Builds a compressor. Returns NULL for COMPRESSOR_ALG_NONE, for an unknown id,
+ * for a backend this build does not include, and on allocation failure.
+ * COMPRESSOR_ALG_ZSTD returns NULL until zstd is vendored.
+ *
+ * config is copied, so the caller may free or change it right after. Passing NULL
+ * means no size limits.
+ *
+ * Each thread that compresses or decompresses calls this once and keeps the
+ * result. To change a setting, build a new instance and free the old one. */
+compressorInstance *newCompressor(compressorAlgId id, const compressorConfig *config);
+void freeCompressor(compressorInstance *c);
+
+/* Maps a failure code to static text. Never returns NULL. */
+static inline const char *compressorStrerror(int err) {
+    switch (err) {
+    case COMPRESSOR_ERR_NONE: return "no error";
+    case COMPRESSOR_ERR_BAD_SIZE: return "value size out of range for this backend";
+    case COMPRESSOR_ERR_NO_MEMORY: return "out of memory";
+    case COMPRESSOR_ERR_COMPRESS: return "compression failed";
+    case COMPRESSOR_ERR_DECOMPRESS: return "decompression failed";
+    default: return "unknown compressor error";
+    }
+}
+
+/* Maps a compression-mode string to an id. Accepts "off", "lz4", and "zstd".
+ * Returns C_OK and writes to *id_out, or C_ERR when the name is unknown. */
+static inline int compressorAlgIdFromName(const char *name, compressorAlgId *id_out) {
+    if (name == NULL || id_out == NULL) return C_ERR;
+    if (!strcasecmp(name, "off")) {
+        *id_out = COMPRESSOR_ALG_NONE;
+    } else if (!strcasecmp(name, "lz4")) {
+        *id_out = COMPRESSOR_ALG_LZ4;
+    } else if (!strcasecmp(name, "zstd")) {
+        *id_out = COMPRESSOR_ALG_ZSTD;
+    } else {
+        return C_ERR;
+    }
+    return C_OK;
+}
+
+/* Static name for an id, for logs and CONFIG GET. Returns "off" for
+ * COMPRESSOR_ALG_NONE and never returns NULL. */
+static inline const char *compressorAlgIdName(compressorAlgId id) {
+    switch (id) {
+    case COMPRESSOR_ALG_LZ4: return "lz4";
+    case COMPRESSOR_ALG_ZSTD: return "zstd";
+    case COMPRESSOR_ALG_NONE: return "off";
+    default: return "off";
+    }
+}
+
+#endif /* COMPRESSOR_ALG_H */
