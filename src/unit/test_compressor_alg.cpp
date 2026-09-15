@@ -69,7 +69,7 @@ static void compressorTestDataInit(compressorTestData *d) {
 /* ===== construction ===== */
 
 TEST(CompressorAlg, NewCompressorLz4) {
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
     EXPECT_STREQ(c->name, "lz4");
     EXPECT_EQ(c->id, COMPRESSOR_ALG_LZ4);
@@ -89,7 +89,7 @@ TEST(CompressorAlg, NewCompressorCopiesConfig) {
     cfg.min_input_len = 256;
     cfg.max_input_len = 131072;
 
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, &cfg);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, &cfg);
     ASSERT_TRUE(c != NULL);
     EXPECT_EQ(c->config.min_input_len, (size_t)256);
     EXPECT_EQ(c->config.max_input_len, (size_t)131072);
@@ -116,7 +116,7 @@ TEST(CompressorAlg, FreeCompressorAcceptsNull) {
 }
 
 TEST(CompressorAlg, Lz4HasNoTrainerAndNoReleaseHook) {
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
     /* LZ4 has no dictionary trainer of its own, so this stays NULL. */
     EXPECT_TRUE(c->api->train == NULL);
@@ -182,7 +182,7 @@ TEST(CompressorAlg, MaxOutputSizeAppliesConfigRange) {
     compressorConfig cfg;
     cfg.min_input_len = 256;
     cfg.max_input_len = 131072;
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, &cfg);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, &cfg);
     ASSERT_TRUE(c != NULL);
 
     /* Below the low end and above the high end are both refused. */
@@ -201,7 +201,7 @@ TEST(CompressorAlg, MaxOutputSizeZeroMeansNoLimit) {
     compressorConfig cfg;
     cfg.min_input_len = 0;
     cfg.max_input_len = 0;
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, &cfg);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, &cfg);
     ASSERT_TRUE(c != NULL);
 
     /* With both limits at 0 only the backend's own limits apply. */
@@ -213,7 +213,7 @@ TEST(CompressorAlg, MaxOutputSizeZeroMeansNoLimit) {
 }
 
 TEST(CompressorAlg, MaxOutputSizeRespectsBackendLimits) {
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
 
     /* An empty value is never compressed, so 0 is refused even with no config. */
@@ -227,7 +227,7 @@ TEST(CompressorAlg, MaxOutputSizeRespectsBackendLimits) {
 }
 
 TEST(CompressorAlg, MaxOutputSizeIsAtLeastTheInput) {
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
 
     /* The bound covers data that does not compress at all, so it can never be
@@ -249,7 +249,7 @@ TEST(CompressorAlg, RoundTripWithoutDictionary) {
     compressorTestData *d = (compressorTestData *)zmalloc(sizeof(*d));
     compressorTestDataInit(d);
 
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
 
     for (int i = 0; i < SAMPLE_COUNT; i++) {
@@ -278,7 +278,7 @@ TEST(CompressorAlg, RoundTripWithDictionary) {
     compressorTestData *d = (compressorTestData *)zmalloc(sizeof(*d));
     compressorTestDataInit(d);
 
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
     void *cdict = c->api->dict_load(d->dict, d->dict_len);
     ASSERT_TRUE(cdict != NULL);
@@ -310,7 +310,7 @@ TEST(CompressorAlg, DictionaryBeatsNoDictionaryOnSmallValues) {
     compressorTestData *d = (compressorTestData *)zmalloc(sizeof(*d));
     compressorTestDataInit(d);
 
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
     void *cdict = c->api->dict_load(d->dict, d->dict_len);
     ASSERT_TRUE(cdict != NULL);
@@ -350,8 +350,8 @@ TEST(CompressorAlg, DictionaryIsSharedBetweenInstances) {
     compressorTestData *d = (compressorTestData *)zmalloc(sizeof(*d));
     compressorTestDataInit(d);
 
-    compressorInstance *writer = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
-    compressorInstance *reader = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *writer = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *reader = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(writer != NULL);
     ASSERT_TRUE(reader != NULL);
     EXPECT_TRUE(writer->state != reader->state); /* separate scratch buffers */
@@ -382,7 +382,7 @@ TEST(CompressorAlg, DictionaryIsSharedBetweenInstances) {
 /* ===== dictionary loading ===== */
 
 TEST(CompressorAlg, DictLoadRejectsEmptyInput) {
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
     EXPECT_TRUE(c->api->dict_load(NULL, 100) == NULL);
     EXPECT_TRUE(c->api->dict_load("abc", 0) == NULL);
@@ -390,7 +390,7 @@ TEST(CompressorAlg, DictLoadRejectsEmptyInput) {
 }
 
 TEST(CompressorAlg, DictLoadTrimsOversizedDictionary) {
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
 
     /* LZ4 uses only the last 64 KiB. A larger dictionary must be trimmed and
@@ -423,7 +423,7 @@ TEST(CompressorAlg, DictLoadTrimsOversizedDictionary) {
 }
 
 TEST(CompressorAlg, DictFreeAcceptsNull) {
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
     c->api->dict_free(NULL);
     freeCompressor(c);
@@ -435,7 +435,7 @@ TEST(CompressorAlg, CompressFailsWhenDestinationTooSmall) {
     compressorTestData *d = (compressorTestData *)zmalloc(sizeof(*d));
     compressorTestDataInit(d);
 
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
 
     char tiny[4];
@@ -456,7 +456,7 @@ TEST(CompressorAlg, CompressFailsWhenDestinationTooSmall) {
 }
 
 TEST(CompressorAlg, CompressRejectsEmptyInput) {
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
     char out[64];
     EXPECT_EQ(c->api->compress(c, NULL, "abc", 0, out, sizeof(out)), (size_t)0);
@@ -465,7 +465,7 @@ TEST(CompressorAlg, CompressRejectsEmptyInput) {
 }
 
 TEST(CompressorAlg, DecompressRejectsBadSizes) {
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
     char out[64];
 
@@ -482,7 +482,7 @@ TEST(CompressorAlg, DecompressFailsOnCorruptBody) {
     compressorTestData *d = (compressorTestData *)zmalloc(sizeof(*d));
     compressorTestDataInit(d);
 
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
 
     size_t bound = c->max_output_size(c, d->len[0]);
@@ -514,7 +514,7 @@ TEST(CompressorAlg, DecompressWithWrongDictionaryDoesNotReturnTheValue) {
     compressorTestData *d = (compressorTestData *)zmalloc(sizeof(*d));
     compressorTestDataInit(d);
 
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
 
     void *right = c->api->dict_load(d->dict, d->dict_len);
@@ -551,7 +551,7 @@ TEST(CompressorAlg, DecompressWithWrongDictionaryDoesNotReturnTheValue) {
 /* ===== data shapes ===== */
 
 TEST(CompressorAlg, RoundTripOnIncompressibleData) {
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
 
     /* Random bytes do not shrink. The frame may grow, which is what the bound is
@@ -578,7 +578,7 @@ TEST(CompressorAlg, RoundTripOnIncompressibleData) {
 }
 
 TEST(CompressorAlg, RoundTripOnHighlyCompressibleData) {
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
 
     size_t len = 8192;
@@ -603,7 +603,7 @@ TEST(CompressorAlg, RoundTripOnHighlyCompressibleData) {
 }
 
 TEST(CompressorAlg, RoundTripAtSizeBoundaries) {
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
 
     /* One byte, the smallest the backend accepts, up to the 128 KiB cap. */
@@ -636,7 +636,7 @@ TEST(CompressorAlg, RepeatedUseOfOneInstanceIsStable) {
     compressorTestData *d = (compressorTestData *)zmalloc(sizeof(*d));
     compressorTestDataInit(d);
 
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
     void *cdict = c->api->dict_load(d->dict, d->dict_len);
     ASSERT_TRUE(cdict != NULL);
@@ -673,7 +673,7 @@ TEST(CompressorAlg, DictionaryMismatchBetweenCompressAndDecompress) {
     compressorTestData *d = (compressorTestData *)zmalloc(sizeof(*d));
     compressorTestDataInit(d);
 
-    compressorInstance *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
+    compressorAlg *c = newCompressor(COMPRESSOR_ALG_LZ4, NULL);
     ASSERT_TRUE(c != NULL);
     void *cdict = c->api->dict_load(d->dict, d->dict_len);
     ASSERT_TRUE(cdict != NULL);
