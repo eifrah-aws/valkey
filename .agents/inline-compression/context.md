@@ -5,13 +5,23 @@ Notes for anyone (human or agent) picking this work up later. Written 2026-09-10
 Feature: inline in-memory value compression for Valkey.
 Issue: [valkey-io/valkey #3423](https://github.com/valkey-io/valkey/issues/3423).
 
-**Working directory for all work on this feature:**
-`/Users/eifrah/devl/valkey-inline-compression`
+**The work is split across two branches**, each in its own git worktree of the
+Valkey repo. Find them with `git worktree list`.
 
-This is a git worktree of `/Users/eifrah/devl/valkey`, on branch
-`inline-compression`. Run every command from here. Do not `cd` into the main
-`valkey` checkout. This file lives at
-`.agents/inline-compression/context.md` inside that worktree.
+| Branch | Holds |
+|---|---|
+| `inline-compression-design` | the design document and these notes |
+| `valkey-inline-compression-compressor-api` | the compressor interface, the LZ4 backend, and its tests |
+
+Run every command from the worktree that owns the files you are changing. Do not
+work in the main checkout, the one on `unstable`.
+
+**Every path in these notes is relative to the repo root**, which is the top of
+whichever worktree you are in. Do not write absolute paths here. Worktrees get
+moved and renamed, and absolute paths go stale the moment that happens.
+
+An earlier branch, `inline-compression`, held everything in one place. Its commits
+were cherry-picked into the two branches above, so it is no longer needed.
 
 ---
 
@@ -27,7 +37,7 @@ Only two places hold the design. Keep both in sync; do not create more copies.
 
 **Retired, do not edit:**
 
-- `/Users/eifrah/work/GeneralTalk/Inline_Compression/merged-design.md` — the older,
+- `~/work/GeneralTalk/Inline_Compression/merged-design.md` — the older,
   longer "full design". Frozen. It still contains sections that the design
   document has since dropped, so treat it as history only.
 - Its Pippin twin: projectId `0eHuRkP0FqRn`, designId `XFOlIJDWemyW`. Frozen.
@@ -36,10 +46,9 @@ Only two places hold the design. Keep both in sync; do not create more copies.
 `design-summary.md` in the old `Inline_Compression` folder. It was moved and
 renamed into this repo.
 
-All paths in the table above are relative to the working directory named at the
-top of this file: `/Users/eifrah/devl/valkey-inline-compression`. The old
-`/Users/eifrah/work/GeneralTalk/Inline_Compression` folder holds only the retired
-document.
+The old `~/work/GeneralTalk/Inline_Compression` folder holds only the retired
+document. It sits outside the repo, which is the one place these notes cannot use
+a relative path.
 
 ---
 
@@ -97,19 +106,17 @@ once already.
 ## 3. Still open
 
 1. **§6.3 of the design: what to free when a read ends.** Options A (value stays
-   compressed), B (value stays plain), and the A-variant (scratch buffer, frame
-   never leaves `val_ptr`). The plan of record is the A-variant first, because it
-   keeps frames alive across reads while dropping the side-map, the `beforeSleep`
-   hook, and the savings cap. The deciding number is *reads per compressed
-   lifetime*, which nobody has measured. Phase 9 of the execution plan measures
-   it.
-2. **`compression-promote-read-threshold` has no single default.** The design
-   still says "3-5, not fixed yet". Same phase 9 measurement should settle it.
-   Lower urgency now that the setting is v2 and hardcoded in v1.
-3. **The stale `compression_alg.h` / `compression_alg.c` files** from an earlier
-   experiment: rewrite or delete. Never decided. Note these are *not* the same as
-   the `src/compression*.{c,h}` files in this checkout, which belong to a
-   different feature (see below).
+   compressed), B (value stays plain), and the A-variant (temp buffer, frame never
+   leaves `val_ptr`). The plan of record is the A-variant first, because it keeps
+   frames alive across reads while dropping the side-map, the `beforeSleep` hook,
+   and the savings cap. The deciding number is *reads per compressed lifetime*,
+   which nobody has measured. Phase 9 of the execution plan measures it.
+2. **Whether to keep the savings cap in some form.** §6.2 used to promise that
+   peak memory can never exceed the no-compression baseline. The preferred
+   ownership rule breaks that promise, because each decompressed reply is a fresh
+   allocation held until the socket write drains. The real bound is
+   `client-output-buffer-limit`, which is unlimited for normal clients by default.
+   Nobody has decided whether that is good enough.
 
 ---
 
@@ -122,9 +129,9 @@ most:
    RDB/replication byte stream (`streamCompressor`, `streamDecompressor`,
    `compressionAlgo` with `ALGO_NONE`/`ALGO_LZF`/`ALGO_LZ4`), together with
    `src/compression_lz4.{c,h}` and `src/compression_stream.{c,h}`. Different
-   feature. New code uses the `value_compression*` file prefix and the
-   `valueCompress*` symbol prefix, and the design's `compressor` vtable becomes
-   `valueCompressor`.
+   feature. New code uses the `compressor_alg*` file prefix. The design's
+   `compressor` vtable became `compressorApi`, the instance is `compressorAlg`,
+   and the config is `compressorConfig`. See `src/compressor_alg.h`.
 2. **`OBJ_ENCODING_COMPRESSED 12` fits.** `src/server.h:799-810` defines 0-11 and
    `encoding` is a 4-bit field (`src/server.h:857`).
 3. **No spare room on `robj`.** `static_assert(sizeof(struct serverObject) <= 8 +
@@ -178,13 +185,18 @@ issue comments, the Pippin artifact, and chat replies.
   successful edit bumps the artifact version.
 - **Shell working directory does not persist** between Bash tool calls in this
   environment; it resets after each call. Use absolute paths, or prefix each
-  command with `cd /Users/eifrah/devl/valkey-inline-compression && ...`.
+  command with `cd <worktree> && ...`.
 
 ---
 
 ## 6. Suggested first move when resuming
 
-Read `design-docs/inline-compression.md`, then `execution-plan.md`, then decide
-whether §6.3 can be closed with a measurement before writing phase 3 code. If
-not, start with phase 1 (vendor zstd plus the `valueCompressor` vtable), which
-does not depend on that decision at all.
+Read `design-docs/inline-compression.md`, then `execution-plan.md`.
+
+Phase 1a is done: `src/compressor_alg.h`, `src/compressor_alg.c`,
+`src/compressor_alg_lz4.c`, and `src/unit/test_compressor_alg.cpp` are on the
+`valkey-inline-compression-compressor-api` branch.
+
+Next is phase 1b, vendoring zstd. It does not depend on the open §6.3 decision,
+and phase 2 needs it, because the trainer needs zstd's dictionary builder even
+when LZ4 does the compressing.

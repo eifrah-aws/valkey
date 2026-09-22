@@ -11,7 +11,7 @@ decision history: `context.md` in this folder.
 
 ## 0. Facts about this tree that shape the plan
 
-Checked in `/Users/eifrah/devl/valkey-inline-compression`:
+Checked in the Valkey tree; see `context.md` for which worktree owns what:
 
 1. **`src/compression.{c,h}` is already taken.** It holds stream compression for
    the RDB/replication byte stream: `streamCompressor`, `streamDecompressor`,
