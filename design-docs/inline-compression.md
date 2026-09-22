@@ -129,23 +129,21 @@ The worker's output is one buffer with a small header in front of the compressed
 typedef struct compressionFrame {
     uint32_t uncompressed_len;  /* size to allocate when decompressing */
     uint32_t dict_id;           /* which compression dictionary decodes this */
-    uint16_t read_streak;       /* reads since this frame was created (§6.4) */
     unsigned char body[];       /* the compressed bytes */
 } compressionFrame;
 ```
 
-10 bytes of header. `dict_id` is the load-bearing field — it is how a frame says *which* compression dictionary can decode me, and it is why old dictionaries can be retired safely (§4).
+8 bytes of header, and the frame never changes after it is built. `dict_id` is the load-bearing field — it is how a frame says *which* compression dictionary can decode me, and it is why old dictionaries can be retired safely (§4).
 
-Three fields we deliberately left out:
-- **No compressed length.** `sdslen(frame) - 10` is exact and free. A stored copy could disagree with sds.
+Four fields we deliberately left out:
+- **No compressed length.** `sdslen(frame) - 8` is exact and free. A stored copy could disagree with sds.
+- **No read counter.** Reads never un-compress a value (§6.4), so there is nothing to count.
 - **No algorithm tag.** `compression-mode` is startup-only (§2), so every frame this process ever creates comes from the same backend. `dict_id` exists to pick the dictionary *version* across retrains (§4), not the algorithm.
 - **No length or magic check.** Frames never come from outside the process (§3), so a malformed frame is our own bug. It should assert, not return a recoverable error.
 
-**One allocation, one copy.** The worker allocates header plus worst-case body once, and the backend compresses straight into the space after the header — no intermediate buffer. The header is built as a stack struct and written with a **single 10-byte `memcpy`**. Never a struct cast: an sds `buf` sits after a 3- or 5-byte sds header, so it is not 4-byte aligned, and a `uint32_t *` cast onto it is undefined behavior.
+**One allocation, one copy.** The worker allocates header plus worst-case body once, and the backend compresses straight into the space after the header — no intermediate buffer. The header is built as a stack struct and written with a **single 8-byte `memcpy`**. Never a struct cast: an sds `buf` sits after a 3- or 5-byte sds header, so it is not 4-byte aligned, and a `uint32_t *` cast onto it is undefined behavior. Offsets must come from named constants, with `static_assert` on `offsetof` for each field.
 
-Two traps worth naming out loud, because both are silent:
-- `sizeof(compressionFrame)` is **12**, not 10 — the struct pads to its 4-byte alignment. Offsets must come from named constants, with `static_assert` on `offsetof` for each field.
-- `max_output_size()` is generous, so the frame must be shrunk to its real length after compressing. Skipping that leaves unused capacity the allocator still charges for, and reported savings would exceed real savings.
+One trap worth naming out loud, because it is silent: `max_output_size()` is generous, so the frame must be shrunk to its real length after compressing. Skipping that leaves unused capacity the allocator still charges for, and reported savings would exceed real savings.
 
 Finally, a **net-savings guard**: if the frame plus header is not meaningfully smaller than the original, we throw it away and count it. Incompressible data costs us one wasted attempt, not permanent overhead.
 
@@ -207,21 +205,25 @@ When a read finishes, **both copies exist** — plain text in `val_ptr`, frame i
 | We free | the plain text | the compressed buffer |
 | Cost now | ~100–200 ns of bookkeeping | none |
 | Cost later | none | rebuild the frame: 3–650 µs of worker CPU, plus a sweep cycle and the idle wait |
-| Machinery needed | side-map, `beforeSleep` hook, savings cap, `read_streak` | none of it; header drops to 8 bytes and becomes immutable |
+| Machinery needed | side-map, `beforeSleep` hook, savings cap | none of it |
 
-**The case for B:** we only compress cold values, so a frame is probably read once and then left alone for a long time. It deletes a lot of the design. It is the same thing as `compression-promote-read-threshold = 1`.
+**The case for B:** we only compress cold values, so a frame is probably read once and then left alone for a long time. It deletes a lot of the design.
 
 **The case for A:** the risk in B is cumulative, not per-command. Every read frees a frame permanently, so any pass that reads much of the keyspace — a wide `MGET`, a script over a range, a `SCAN`+`GET` loop, an export or warm-up job — frees every frame it touches. The whole database then has to be recompressed at 25 ms per tick while sitting at baseline memory. If those passes are periodic and faster than recovery, the keyspace never converges.
 
 **A variant of A:** never move the frame out of `val_ptr`. Decompress into a temp buffer and free it once the value has been replied to. Reads still never destroy a frame, and the side-map, the `beforeSleep` hook, and the savings cap all disappear. The price is no amortization across reads in one iteration, plus an audit rule that no caller keeps the view past the point where the buffer is freed. §6.2 covers who owns that buffer and why it cannot always be a stack object.
 
-**What settles it:** *reads per compressed lifetime* — how many reads a frame sees before it dies. Nobody has measured this, and the 3–5 default for `K` is a guess too. If it is almost always 1, B wins and the machinery goes away.
+**What settles it:** *reads per compressed lifetime* — how many reads a frame sees before it dies. Nobody has measured this. If it is almost always 1, B wins and the machinery goes away.
 
-### 6.4 Read-hot values need an exit
+### 6.4 A read never un-compresses a value
 
-A value that turns hot again after compression would pay decompress-and-restore on every read, forever. That is what `read_streak` in the frame is for. After `compression-promote-read-threshold` reads (default 3–5), we promote the value to permanent RAW instead of restoring the frame.
+Once a value is compressed it stays compressed. A read decompresses into a temp buffer and leaves the frame alone. Only three things turn a value back to plain text: a write, which discards the frame; a restart, which starts from a plain keyspace (§3); and the sweeper choosing not to compress it in the first place (§5.1).
 
-Wasted work is bounded at `K` per compressed lifetime. The counter lives in the frame, so it costs nothing for values that are never compressed, and resets for free when a write discards the frame.
+An earlier draft had the opposite rule. It counted reads in the frame and promoted a value to permanent RAW after `compression-promote-read-threshold` reads, to stop a value that turned hot again from paying decompression forever. That rule was removed, because the counter measured the wrong thing. It counted reads for the whole life of the frame, with no decay and no time window, so three reads spread over six months looked the same as three reads in one second. A cold value that is read now and then — the exact value this feature helps most — would be promoted and stay plain. Over months a server would drift back to an uncompressed keyspace and give up the savings it had already earned.
+
+Hot values are kept out by the coldness gate instead. §5.1 only takes a value that is idle long enough or has a low LFU frequency, so a value that is read often is never compressed. A value that turns hot after it was compressed pays decompression on each read until a write or a restart clears the frame. That cost is real, and §6.2 caps the worst case per read through `compression-max-value-size`.
+
+This is also what lets the frame stay immutable and 8 bytes long (§5.4).
 
 ---
 
@@ -297,7 +299,6 @@ None of these are configurable in v1 — the mechanisms behind them run with the
 | Name | Values | Default | What it does | Change at runtime |
 |---|---|---|---|---|
 | `compression-inflight-max-bytes` | bytes | `33554432` (32 MiB) | Cap on snapshot bytes queued to workers. | No |
-| `compression-promote-read-threshold` | `0`–`65535` | 3–5, not fixed yet; `0` disables | Reads after which a value is promoted to permanent RAW (§6.4). | No |
 | `compression-automatic-sweeper-interval` | seconds, `0` = keep cycling | `0` | Pause between sweeper passes. | No |
 | `compression-sweep-max-cpu-pct` | `1`–`100` | `25` | Share of each cron tick the sweeper may spend. | No |
 | `compression-min-savings-ratio` | percent | `10` | Net-savings guard. Below this, the frame is thrown away. | No |
