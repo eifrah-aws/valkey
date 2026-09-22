@@ -145,7 +145,7 @@ Three fields we deliberately left out:
 
 Two traps worth naming out loud, because both are silent:
 - `sizeof(compressionFrame)` is **12**, not 10 — the struct pads to its 4-byte alignment. Offsets must come from named constants, with `static_assert` on `offsetof` for each field.
-- `compress_bound` is generous, so the frame must be shrunk to its real length after compressing. Skipping that leaves unused capacity the allocator still charges for, and reported savings would exceed real savings.
+- `max_output_size()` is generous, so the frame must be shrunk to its real length after compressing. Skipping that leaves unused capacity the allocator still charges for, and reported savings would exceed real savings.
 
 Finally, a **net-savings guard**: if the frame plus header is not meaningfully smaller than the original, we throw it away and count it. Incompressible data costs us one wasted attempt, not permanent overhead.
 
@@ -164,19 +164,39 @@ The cost is an audit. Sites that read `obj->encoding` directly must handle the n
 
 ### 6.2 The read helper
 
-Every read goes through one function:
+Every read goes through one function, `objectGetUncompressedView()`. Not compressed → returns the object untouched, zero cost. Compressed → decompresses into a temp buffer and returns something that looks like an ordinary RAW string. Callers need no changes.
 
-```c
-robj *objectGetUncompressedView(robj *o, sds *scratch, robj *view_out);
-```
-
-Not compressed → returns the object untouched, zero cost. Compressed → decompresses into a temp buffer, stashes the frame aside, and returns something that looks like an ordinary RAW string. Callers need no changes.
+Its exact signature depends on the choice in "The reply layer does not always copy the value" below, because that choice decides who owns the temp buffer.
 
 At `beforeSleep` we put the frame back with a pointer swap — free, no recompression. If the key was written meanwhile, we drop the frame and keep the plain value; the sweeper can compress it again later.
 
 **This check must compare versions, not pointers.** A same-size in-place write (`SETBIT`) can reuse the same allocation: pointer-equal, content different. Only the version catches that.
 
-**Memory is bounded by construction:** temp decompressed bytes never exceed the bytes compression has saved. Past that line, a value falls back to permanent decompression. Peak memory cannot exceed the no-compression baseline.
+#### The reply layer does not always copy the value
+
+A view that looks like a RAW string can be sent to the client without a copy. `addReplyBulk()` first tries `tryAvoidBulkStrCopyToReply()`, and on that path the reply stores a raw pointer into the object's sds and calls `incrRefCount()`. The object and its bytes must then stay alive until the socket write completes, which happens after the command returns. `isCopyAvoidPreferred()` takes that path when `encoding` is `OBJ_ENCODING_RAW` and the refcount is not `OBJ_STATIC_REFCOUNT`.
+
+A stack view holding a temp buffer therefore fails twice: `incrRefCount()` on a stack object panics with "You tried to retain an object allocated in the stack", and freeing the temp buffer at the end of the command leaves the reply pointing at freed memory. Both failures apply to every option in §6.3.
+
+Two ways to fix it.
+
+**Option 1 — transfer ownership to the reply layer (preferred).** The view is a real heap object with refcount 1 that owns the plaintext:
+
+```c
+robj *objectGetUncompressedView(robj *o);
+```
+
+The caller drops its own reference right after replying, and the refcount decides the rest. On the copy path the count reaches zero at once and the buffer is freed. On the copy-avoid path the reply holds the last reference and the write completion handler frees the buffer. The caller needs no flag and no branch, because it cannot know which path the reply layer picked: that decision needs the client.
+
+Compressed values keep copy avoidance, which matters most for large values, where it saves a full copy. The price is one heap allocation per decompressed read instead of a stack view.
+
+**Option 2 — force the copy.** Build the view with `OBJ_STATIC_REFCOUNT`, using the `initStaticStringObject` idiom. `isCopyAvoidPreferred()` then refuses the view, so the bytes really are copied and the temp buffer can be freed as soon as the reply is queued. This keeps the stack view and needs no allocation, but compressed values lose copy avoidance.
+
+A size split is possible: small values take option 2, large values take option 1, using the size threshold `isCopyAvoidPreferred()` already applies.
+
+**How much memory a read pass can hold.** Free each temp buffer as soon as its value has been replied to, not at the end of the command. Otherwise one `MGET` over many compressed keys, or one script that reads many keys, keeps a temp buffer alive for every value it touched.
+
+Under option 1 the bytes held by copy-avoided replies are already accounted for: `io_tracked_reply_len` feeds the client's memory usage and is read by `closeClientOnOutputBufferLimitReached()`, so they count toward `client-output-buffer-limit`. That limit is unlimited for normal clients by default, so the bound exists but is off unless an operator sets it. Option 1 therefore does not hold peak memory at the no-compression baseline: without compression a copy-avoided reply points at an object that already exists in the keyspace, while here each one is a fresh allocation. Option 2 does hold the baseline, at the cost of a copy per value.
 
 ### 6.3 Open decision: what do we free when the read ends?
 
@@ -193,7 +213,7 @@ When a read finishes, **both copies exist** — plain text in `val_ptr`, frame i
 
 **The case for A:** the risk in B is cumulative, not per-command. Every read frees a frame permanently, so any pass that reads much of the keyspace — a wide `MGET`, a script over a range, a `SCAN`+`GET` loop, an export or warm-up job — frees every frame it touches. The whole database then has to be recompressed at 25 ms per tick while sitting at baseline memory. If those passes are periodic and faster than recovery, the keyspace never converges.
 
-**A variant of A:** never move the frame out of `val_ptr`. Decompress into a scratch buffer, return a stack `robj`, free the scratch at end of command. Reads still never destroy a frame, and the side-map, the `beforeSleep` hook, and the cap all disappear. The price is no amortization across reads in one iteration, plus an audit rule that no caller keeps the view past its command.
+**A variant of A:** never move the frame out of `val_ptr`. Decompress into a temp buffer and free it once the value has been replied to. Reads still never destroy a frame, and the side-map, the `beforeSleep` hook, and the savings cap all disappear. The price is no amortization across reads in one iteration, plus an audit rule that no caller keeps the view past the point where the buffer is freed. §6.2 covers who owns that buffer and why it cannot always be a stack object.
 
 **What settles it:** *reads per compressed lifetime* — how many reads a frame sees before it dies. Nobody has measured this, and the 3–5 default for `K` is a guess too. If it is almost always 1, B wins and the machinery goes away.
 
