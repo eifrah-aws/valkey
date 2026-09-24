@@ -60,3 +60,6 @@ __pycache__
 src/unit/.flags
 valkey-unit-tests
 src/.idea/*
+
+# RDB compression POC work directory (large RDB files)
+.poc-run/

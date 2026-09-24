@@ -2165,6 +2165,15 @@ struct valkeyServer {
     int saveparamslen;                    /* Number of saving points */
     char *rdb_filename;                   /* Name of RDB file */
     int rdb_compression;                  /* RDB compression mode */
+    /* POC only, branch valkey-inline-compression-rdb-poc. Compress string values
+     * with LZ4 while loading an RDB, to measure the load-time cost. Values are
+     * left unmarked, so the keyspace is unreadable afterwards. Do not merge. */
+    int poc_compress_on_load;             /* rdb-poc-compress-on-load */
+    long long poc_values_seen;            /* string values the load path saw */
+    long long poc_values_compressed;      /* of those, values that shrank */
+    long long poc_bytes_plain;            /* their size before compressing */
+    long long poc_bytes_compressed;       /* their size after compressing */
+    long long poc_compress_us;            /* time spent inside LZ4 */
     int repl_compression;                 /* Replication compression mode */
     int rdb_checksum;                     /* Use RDB checksum? */
     int rdb_del_sync_files;               /* Remove RDB files used only for SYNC if

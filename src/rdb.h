@@ -203,6 +203,7 @@ int rdbLoadLenByRef(rio *rdb, int *isencoded, uint64_t *lenptr);
 int rdbGetObjectType(robj *o, int rdbver);
 int rdbLoadObjectType(rio *rdb);
 int rdbLoad(char *filename, rdbSaveInfo *rsi, int rdbflags);
+void pocLogCompressionSummary(void); /* POC only, rdb.c. Do not merge. */
 int rdbSaveBackground(int req, char *filename, rdbSaveInfo *rsi, int rdbflags);
 int rdbStartBgsave(int bgsave_type);
 int resolveBgsaveType(void);

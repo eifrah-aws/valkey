@@ -36,6 +36,7 @@
 #include "server.h"
 #include "ordered_index.h"
 #include "lzf.h" /* LZF compression library */
+#include <lz4.h>  /* POC only, branch valkey-inline-compression-rdb-poc. Do not merge. */
 #include "zipmap.h"
 #include "endianconv.h"
 #include "fpconv_dtoa.h"
@@ -2162,6 +2163,81 @@ int lpValidateIntegrityAndDups(unsigned char *lp, size_t size, int pairs, int al
  * On success a newly allocated object is returned, otherwise NULL.
  * When the function returns NULL and if 'error' is not NULL, the
  * integer pointed by 'error' is set to the type of error that occurred */
+
+/* ===== POC only: branch valkey-inline-compression-rdb-poc. Do not merge. =====
+ *
+ * Compress a just-loaded string value in place with LZ4, no dictionary. The
+ * result is stored raw: no frame header, no encoding change, nothing marks the
+ * value as compressed. So the keyspace is unreadable after a load with
+ * rdb-poc-compress-on-load enabled. That is fine, because the only thing this
+ * measures is what compressing during load costs in time and what it saves in
+ * memory.
+ *
+ * Only values at or above POC_MIN_VALUE_SIZE are attempted, matching the
+ * compression-min-value-size default in the design. A value that does not shrink
+ * is left alone. */
+#define POC_MIN_VALUE_SIZE 256
+
+static void pocCompressValue(robj *o) {
+    if (!server.poc_compress_on_load) return;
+    if (objectGetType(o) != OBJ_STRING) return;
+    if (objectGetEncoding(o) != OBJ_ENCODING_RAW) return;
+
+    sds plain = objectGetVal(o);
+    size_t plain_len = sdslen(plain);
+    if (plain_len < POC_MIN_VALUE_SIZE || plain_len > (size_t)LZ4_MAX_INPUT_SIZE) return;
+
+    server.poc_values_seen++;
+
+    int bound = LZ4_compressBound((int)plain_len);
+    if (bound <= 0) return;
+
+    /* Compress into a reused scratch buffer, then allocate the sds at the exact
+     * size. Allocating the bound and shrinking afterwards looks cheaper, but
+     * realloc on some platforms keeps the original block, so the value still
+     * occupies the worst-case size and the memory saving disappears. Measured on
+     * macOS with libc malloc: used_memory did not move at all. */
+    static char *scratch = NULL;
+    static int scratch_cap = 0;
+    if (bound > scratch_cap) {
+        scratch = zrealloc(scratch, (size_t)bound);
+        scratch_cap = bound;
+    }
+
+    monotime start = getMonotonicUs();
+    int clen = LZ4_compress_default(plain, scratch, (int)plain_len, bound);
+    server.poc_compress_us += (long long)(getMonotonicUs() - start);
+
+    if (clen <= 0 || (size_t)clen >= plain_len) return; /* no gain, keep the plain value */
+
+    sds out = sdsnewlen(scratch, (size_t)clen);
+    objectSetVal(o, out); /* does not free the old value */
+    sdsfree(plain);
+
+    server.poc_values_compressed++;
+    server.poc_bytes_plain += (long long)plain_len;
+    server.poc_bytes_compressed += (long long)clen;
+}
+
+/* Logs what the POC did, and resets the counters for the next load. */
+void pocLogCompressionSummary(void) {
+    if (!server.poc_compress_on_load) return;
+    double ratio = 0;
+    if (server.poc_bytes_plain > 0)
+        ratio = 100.0 * (double)server.poc_bytes_compressed / (double)server.poc_bytes_plain;
+    serverLog(LL_NOTICE,
+              "POC compress-on-load: seen=%lld compressed=%lld plain=%lld bytes "
+              "compressed=%lld bytes (%.1f%% of plain) lz4_time=%.3f seconds",
+              server.poc_values_seen, server.poc_values_compressed, server.poc_bytes_plain,
+              server.poc_bytes_compressed, ratio, (double)server.poc_compress_us / 1000000.0);
+    server.poc_values_seen = 0;
+    server.poc_values_compressed = 0;
+    server.poc_bytes_plain = 0;
+    server.poc_bytes_compressed = 0;
+    server.poc_compress_us = 0;
+}
+/* ===== end POC ===== */
+
 robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error, int rdbflags, mstime_t now) {
     robj *o = NULL, *ele, *dec;
     uint64_t len;
@@ -2174,6 +2250,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error, int rd
         /* Read string value */
         if ((o = rdbLoadEncodedStringObject(rdb)) == NULL) return NULL;
         o = tryObjectEncodingEx(o, 0);
+        pocCompressValue(o); /* POC only. Do not merge. */
     } else if (rdbtype == RDB_TYPE_LIST) {
         /* Read list value */
         if ((len = rdbLoadLen(rdb, NULL)) == RDB_LENERR) return NULL;

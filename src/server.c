@@ -7696,6 +7696,7 @@ void loadDataFromDisk(void) {
         int rdb_load_ret = rdbLoad(server.rdb_filename, &rsi, rdb_flags);
         if (rdb_load_ret == RDB_OK) {
             serverLog(LL_NOTICE, "DB loaded from disk: %.3f seconds", (float)(ustime() - start) / 1000000);
+            pocLogCompressionSummary(); /* POC only. Do not merge. */
 
             /* Restore the replication ID / offset from the RDB file. */
             if (rsi.repl_id_is_set && rsi.repl_offset != -1 &&
