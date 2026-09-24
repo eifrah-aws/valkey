@@ -25,49 +25,87 @@ more, which is the whole reason the design has one.
 
 ## Running it
 
-```bash
-make -C src -j8                      # build valkey-server and valkey-cli
-./utils/rdb-poc/run-poc.sh           # 5M keys, 512-byte values, port 7777
-```
+One command, from the repo root. It builds, fills, saves, and runs both steps.
 
-Environment overrides: `KEYS`, `VALUE_SIZE`, `PORT`, `WORK`, and `REUSE_RDB=0` to
-rebuild the RDB instead of reusing the one in the work directory.
+```bash
+./run-rdb-poc.sh
+```
 
 A smaller run for a quick check:
 
 ```bash
-KEYS=50000 REUSE_RDB=0 WORK=/tmp/poc PORT=7791 ./utils/rdb-poc/run-poc.sh
+KEYS=40000 REPEATS=2 REUSE_RDB=0 WORK=/tmp/poc ./run-rdb-poc.sh
 ```
+
+Knobs, all optional:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `KEYS` | 5000000 | number of keys |
+| `VALUE_SIZE` | 512 | bytes per value |
+| `REPEATS` | 3 | how many times to run each load |
+| `PORT` | 6379 | server port |
+| `WORK` | `<repo>/.poc-run` | scratch directory for the RDB and the logs |
+| `REUSE_RDB` | 1 | set 0 to rebuild the RDB instead of reusing it |
+| `SKIP_BUILD` | 0 | set 1 to skip the build |
+| `MALLOC` | unset | passed to make. Unset takes the platform default: jemalloc on Linux, libc on macOS. |
+
+### Two safety rules in the script
+
+The script runs `FLUSHALL`, so pointing it at the wrong server destroys data. Two
+checks stop that, and both exist because it happened during development.
+
+1. **It stops every `valkey-server` on the host before starting.** It lists what it
+   kills. Then, if the port is still taken by something that is not a
+   `valkey-server`, it reports what holds the port and exits. It never moves to
+   another port silently.
+2. **After every start it proves the server is ours,** before any command that
+   writes. It compares `process_id` against the pid it launched, compares `dir`
+   against the work directory, and checks that `rdb-poc-compress-on-load` exists,
+   which only this build has. Any mismatch aborts.
+
+### Running on Linux with jemalloc
+
+Nothing special to do. `make` picks jemalloc on Linux, and the script reports
+`mem_allocator` in the summary so the numbers are comparable across hosts. The
+allocator matters a lot here, because part of the memory saving comes from
+compressed values landing in a smaller size class, and jemalloc's bins differ from
+libc's. Expect the `used_memory` change to differ from the macOS numbers below even
+on identical data.
 
 ## Results
 
-5,000,000 keys, 512-byte JSON-like values, LZ4 with no dictionary. macOS, libc
-malloc, `-O3 -flto`. RDB on disk is 2.1 GB, and the fill took 127 seconds. Three
-runs, with the RDB in the page cache for all of them.
+5,000,000 keys, 512-byte JSON-like values, LZ4 with no dictionary. macOS arm64,
+libc malloc, `-O3 -flto`, 12 cores. RDB on disk is 2.1 GB, and the fill took about
+2 minutes. Three runs of each load, with the RDB in the page cache throughout.
 
-| | Baseline | Compress on load | Change |
-|---|---|---|---|
-| Load time | 7.22 / 7.01 / 6.86 s | 10.66 / 10.51 / 10.36 s | +3.5 s, about +50% |
-| `used_memory` | 3.27 GB | 2.48 GB | -849 MB, -24% |
-| Value bytes | 2,559,312,928 | 2,192,514,923 | -14.3% |
-| Time inside LZ4 | - | 3.22 s | 92% of the extra load time |
+```
+    keys=5000000 value_size=512 allocator=libc runs=3
+                                 baseline       compress       change
+    load time (mean)                7.20s         10.38s      +44.2%
+    used_memory                   3.27 GB        2.48 GB      -24.2%
+    used_memory_rss               3.36 GB        2.52 GB      -25.1%
+    value bytes                   2.38 GB        2.04 GB      -14.3%
+    time inside LZ4                     -           3.21s 101% of delta
+```
 
 Read these four things out of it:
 
-1. **Load takes half again as long.** 7.0 s becomes 10.5 s on this dataset. The
-   cost scales with the data, not with the key count alone: 3.2 s of LZ4 for
+1. **Load takes about 44% longer.** 7.20 s becomes 10.38 s on this dataset. The
+   cost scales with the bytes, not with the key count alone: 3.21 s of LZ4 for
    2.56 GB of values is about 800 MB/s, or 0.64 us per 512-byte value.
-2. **LZ4 is nearly all of the cost.** 3.22 s of the 3.5 s delta is inside
-   `LZ4_compress_default`. The rest is allocation churn from freeing the plain
-   value and allocating the compressed one.
-3. **The memory saving is bigger than the byte saving**, 24% against 14.3%,
+2. **LZ4 is the whole cost.** The time inside `LZ4_compress_default` matches the
+   extra load time to within measurement noise, hence the "101% of delta". There is
+   no meaningful overhead beyond the compression itself.
+3. **The memory saving is bigger than the byte saving**, 24.2% against 14.3%,
    because the compressed values cross into a smaller allocator size class. Do not
-   expect that to hold at other value sizes. See "Reading the memory number".
-4. **This is the pessimistic ratio.** LZ4 has no dictionary here. On the same
-   shape of data, the unit test on the compressor branch measured 89.5% of original
-   without a dictionary and 13.2% with one. A dictionary costs the same time per
-   byte, so the load-time penalty would stay near 50% while the saving would be far
-   larger. Anyone using this number to judge the feature should know that.
+   expect that to hold at other value sizes, or under a different allocator. See
+   "Reading the memory number".
+4. **This is the pessimistic ratio.** LZ4 has no dictionary here. On the same shape
+   of data, the unit test on the compressor branch measured 89.5% of original
+   without a dictionary and 13.2% with one. A dictionary costs about the same time
+   per byte, so the load-time penalty would stay near 44% while the saving would be
+   far larger. Anyone using this number to judge the feature should know that.
 
 ## The data shape decides the ratio
 
@@ -106,7 +144,7 @@ A different value size may cross no boundary and save nothing at all.
 
 | File | What it is |
 |---|---|
-| `run-poc.sh` | Driver. Fills the keyspace, saves the RDB, then runs both steps. |
+| `../../run-rdb-poc.sh` | The driver, at the repo root. Builds, fills, saves, runs both steps, prints a summary. |
 | `gen-load.py` | Generates RESP `SET` commands on stdout for `valkey-cli --pipe`. |
 
 The server change is small and marked. Search for `POC only` in `src/rdb.c`,
