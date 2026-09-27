@@ -27,13 +27,31 @@ were cherry-picked into the two branches above, so it is no longer needed.
 
 ## 1. Where the documents live
 
-Only two places hold the design. Keep both in sync; do not create more copies.
+**Rule: a change to the design lands in all three of these, in the same sitting.
+Never one of them alone.** They drift the moment you skip one, and the drift is
+silent because nobody reads all three at once.
 
-| What | Where |
-|---|---|
-| Design document | `design-docs/inline-compression.md` in this repo |
-| Pippin artifact | projectId `o7J4WQhgTEQD`, designId `Fr7Yvs4QI4n0` — https://pippin.amazon.dev/architect/o7J4WQhgTEQD/inline-in-memory-compression-for-valkey-design-summary?artifact=Fr7Yvs4QI4n0 |
-| Execution plan | `execution-plan.md` next to this file |
+| # | Source | Where |
+|---|---|---|
+| 1 | Pippin: "Design Summary" | projectId `o7J4WQhgTEQD`, designId `Fr7Yvs4QI4n0` |
+| 2 | Pippin: "Why We Are Building This" | projectId `o7J4WQhgTEQD`, designId `nDi5hlEIYah3` |
+| 3 | Markdown | `design-docs/inline-compression.md` for the design, `.agents/inline-compression/why-1pager.md` for the why |
+
+Source 3 is two files because sources 1 and 2 are two documents. Each Pippin
+artifact has exactly one markdown twin:
+
+- "Design Summary" pairs with `design-docs/inline-compression.md`.
+- "Why We Are Building This" pairs with `.agents/inline-compression/why-1pager.md`.
+
+A fact that appears in both documents, such as the RDB rule, has to be changed in
+all four files. Do not create a fifth copy.
+
+Use `pippin_update_artifact` with `updateType: string_replace`, then read the
+artifact back and check the stored text. A write that returns a new version number
+is not proof the right text landed.
+
+`execution-plan.md` sits next to this file. It is an implementation plan, not a
+design, so it has no Pippin twin, but it also goes stale and needs the same care.
 
 **Retired, do not edit:**
 
@@ -56,29 +74,31 @@ a relative path.
 
 These were argued out and closed. Do not reopen them without a new reason.
 
-1. **Nothing compressed leaves the process.** RDB, AOF, full sync, `DUMP`,
-   `MIGRATE` all carry plain bytes. No `RDB_VERSION` bump, no dictionary
-   serialization, no replica capability negotiation, no untrusted frames. This is
-   the most valuable invariant in the design and it has its own test phase.
+1. **Stored versus logical persistence is format-specific.** RDB and an
+   RDB-format AOF base preserve plain and compressed values as-is, including
+   frame metadata and referenced dictionaries. Command-form AOF bases,
+   incremental AOF files, replication commands, `DUMP`, and `MIGRATE` carry
+   logical uncompressed bytes.
 2. **One switch, and it names the algorithm.** `compression-mode` takes `off`,
    `lz4`, or `zstd`. There is no separate `compression-alg`. An operator cannot
    express "compression on, no backend chosen".
 3. **Three settings are startup-only:** `compression-mode`,
    `compression-threads`, `compression-dict-size`. `CONFIG SET` against them is
    rejected, like Valkey's `*_cpulist` settings.
-4. **No drain phase, no runtime mode transitions.** A restart is a full reset,
-   because nothing compressed is ever persisted. A primary and a replica may even
-   run different algorithms.
-5. **One backend for the whole process life.** Chosen once at startup. This is
-   what deletes: a per-entry backend field in the dictionary registry,
-   both-backends-live handling, per-frame algorithm tags, and frame magic.
-   `dict_id` picks a dictionary *version* across retrains, never an algorithm.
+4. **No drain phase and no runtime mode transitions.** The configured mode
+   controls new compression for the process lifetime. Persisted frames survive
+   RDB and RDB-format AOF restore, so startup also loads the decoder contexts
+   and dictionaries referenced by those frames.
+5. **One encoder backend, potentially several decoder backends.** New frames use
+   the startup-selected mode. Persisted frames record their algorithm and format,
+   so decoder contexts for older algorithms remain available until those frames
+   disappear. `dict_id` picks a dictionary version within the recorded backend.
 6. **No separate sweeper on/off switch.** An earlier draft had
    `compression-automatic-sweeper` with `enabled`/`disabled`. It was removed
    because it allowed a silent no-op state (`mode=zstd` plus
    `sweeper=disabled`). The sweeper now runs whenever `compression-mode` is not
    `off`.
-7. **The 14 advanced settings are v2.** In v1 they are hardcoded defaults, not
+7. **The 15 advanced settings are v2.** In v1 they are hardcoded defaults, not
    `CONFIG` names. Reason: none of the numbers behind them are backed by measured
    tests yet.
 8. **Removed from the design on purpose:** the cost estimate section, the "what
@@ -94,29 +114,30 @@ These were argued out and closed. Do not reopen them without a new reason.
 
 ### Where the sweeper runs
 
-The sweeper runs on `compressionCron`, on the cron tick, paced by
-`budget_us = (1_000_000 / server.hz) * compression-sweep-max-cpu-pct / 100`,
-which is about 25 ms per tick at defaults. It does **not** run in `beforeSleep`.
-`beforeSleep` only restores the transient decompressed view, which is an O(1)
-operation of roughly 100-200 ns per key touched. This was a point of confusion
-once already.
+The sweeper runs in `compressionCron` on the cron tick. It does not use a CPU
+percentage or wall-clock budget. Each call inspects at most
+`compression-sweep-max-keys-per-tick` keys, 100 by default, and preserves its
+cursor for the next tick. It enqueues only while both
+`compression-max-inflight-requests` (100) and
+`compression-inflight-max-bytes` (32 MiB) have room. It stops on either cap and
+resumes after workers release capacity. It does **not** run in `beforeSleep`.
+Client reads promote compressed values to RAW immediately on the main thread;
+there is no transient decompressed view to restore.
 
 ---
 
-## 3. Still open
+## 3. Read-path decision
 
-1. **§6.3 of the design: what to free when a read ends.** Options A (value stays
-   compressed), B (value stays plain), and the A-variant (temp buffer, frame never
-   leaves `val_ptr`). The plan of record is the A-variant first, because it keeps
-   frames alive across reads while dropping the side-map, the `beforeSleep` hook,
-   and the savings cap. The deciding number is *reads per compressed lifetime*,
-   which nobody has measured. Phase 9 of the execution plan measures it.
-2. **Whether to keep the savings cap in some form.** §6.2 used to promise that
-   peak memory can never exceed the no-compression baseline. The preferred
-   ownership rule breaks that promise, because each decompressed reply is a fresh
-   allocation held until the socket write drains. The real bound is
-   `client-output-buffer-limit`, which is unlimited for normal clients by default.
-   Nobody has decided whether that is good enough.
+A client read promotes a compressed value to RAW and adds the key to a bounded
+100,000-entry hot-key LRU. Every later read refreshes the entry. Entries expire
+after `compression-min-idle-seconds`, 60 seconds by default, and the sweeper
+also requires the normal idle/LFU coldness check. This avoids decompression on
+every hot read and prevents immediate recompression after promotion.
+
+The remaining item to validate is the workload tradeoff: a broad one-time scan
+can promote many values and temporarily return memory toward the uncompressed
+baseline. Measure hot-key LRU coverage, capacity churn, promotion memory, and
+cold-to-hot transitions before changing the 100,000-entry bound.
 
 ---
 

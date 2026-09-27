@@ -39,40 +39,30 @@ Checked in the Valkey tree; see `context.md` for which worktree owns what:
 
 ---
 
-## 1. Decision gate before coding the read path
+## 1. Read-path decision before coding
 
-`inline-compression.md` §6.3 is still open: what to free when a read ends.
-Phases 4 and 6 have very different size depending on the answer.
+`inline-compression.md` §7 now chooses RAW promotion with a bounded hot-key
+LRU. A client read of a compressed value decompresses it once, replaces the
+frame with the RAW object, and records the key as recently read. Every later
+read refreshes that entry. The sweeper skips entries in the hot-key LRU and
+still requires the regular idle/LFU coldness check.
 
-| Option | Extra machinery |
-|---|---|
-| A — value stays compressed | side-map, `beforeSleep` restore, savings cap |
-| A-variant — temp buffer, frame never leaves `val_ptr` | none of the above; audit rule that no caller keeps the view past the point where the buffer is freed |
-| B — value stays plain | none |
+This choice needs no side-map, `beforeSleep` restoration, read counter, or
+per-read temporary view. The hot-key LRU holds at most 100,000 entries and each
+entry expires after `compression-min-idle-seconds`, 60 seconds by default. It
+therefore measures recent activity instead of lifetime reads. A key can be
+compressed again after it leaves the LRU and passes the coldness gate.
 
-**Plan of record: build the A-variant first.** It keeps every frame alive across
-reads, which is the property option B risks losing, and it drops the side-map,
-the `beforeSleep` hook and the cap. Phase 9 measures reads per compressed
-lifetime and can then justify moving to full A or to B.
+The frame header remains **12 bytes** and immutable: `uncompressed_len`,
+`dict_id`, `algorithm_id`, and `format_version`, with no `read_streak`. Keep the
+`static_assert` on `offsetof` for each field. An sds `buf` is not guaranteed to
+be aligned for these fields, so build the header with a 12-byte `memcpy` and
+never a struct cast.
 
-**Promotion was removed.** An earlier draft promoted a value to permanent RAW
-after `compression-promote-read-threshold` reads, counted in the frame. The
-counter had no decay and no time window, so three reads months apart looked like
-three reads in one second, and a cold value that is read now and then would drift
-back to plain and stay there. The setting is gone and §6.4 now says a read never
-un-compresses a value. Hot values are kept out by the coldness gate in §5.1.
-
-Consequence for the frame header: it is **8 bytes** and immutable — two
-`uint32_t` fields, no `read_streak`. Keep the `static_assert` on `offsetof` for
-each field. There is no padding to worry about any more, but an sds `buf` is
-still not 4-byte aligned, so build the header with a `memcpy` and never a struct
-cast.
-
-**Also settled, in §6.2: who owns the decompressed buffer.** `addReplyBulk()` may
-skip the copy and hold a raw pointer into the object's sds. So the view cannot be
-a stack `robj`. The preferred fix hands the buffer to the reply layer inside a
-heap object with refcount 1 and lets the refcount decide when it is freed. Phase
-3 has to implement that, not the stack view the design first described.
+The decompressed RAW object is installed in the keyspace before the reply is
+built. Existing reply ownership then applies: copy avoidance may retain the
+object with `incrRefCount()`, and a later write or delete releases the keyspace
+reference without invalidating the queued reply.
 
 ---
 
@@ -135,22 +125,27 @@ values.
 **Goal:** a compressed `robj` can exist and every existing reader handles it.
 Still nothing creates one.
 
-- `compressionFrame` build and parse helpers: single 8-byte `memcpy`, never a
+- `compressionFrame` build and parse helpers: single 12-byte `memcpy`, never a
   struct cast, named offset constants, `static_assert` on `offsetof`, shrink to
   real length after compressing, net-savings guard.
 - `OBJ_ENCODING_COMPRESSED 12` in `src/server.h`; `"compressed"` in the
   `OBJECT ENCODING` switch in `src/object.c` (around `src/object.c:1313`).
-- `objectGetUncompressedView()` (§6.2) in the A-variant shape, using option 1:
-  decompress into a heap `robj` with refcount 1 that owns the plaintext, and let
-  the caller `decrRefCount()` it after replying. Not a stack view — see the
-  copy-avoidance risk below. Free each buffer per value, not at command end. Use
-  `objectGetVal`/`objectSetVal`/`objectSetEncoding` rather than touching fields.
+- A client-read helper (§7.2) that receives database and key context. For a
+  compressed value, decompress into a heap RAW object, replace the frame in the
+  keyspace before replying, and record the key in the hot-key LRU. Plain reads
+  refresh an existing hot-key entry. Use `objectGetVal`/`objectSetVal`/
+  `objectSetEncoding` rather than touching fields.
+- Existing reply ownership applies after promotion. Copy avoidance may retain
+  the installed RAW object; a later write or delete only drops the keyspace
+  reference.
 - **The audit.** Walk every site that tests `objectGetEncoding()` or
-  `OBJ_ENCODING_RAW` and sort it into the two buckets from §6.1:
-  - needs plaintext → `rdb.c` (save), `cluster.c` (`DUMP`), `debug.c`
-    (`DEBUG DIGEST`), `t_string.c` read commands, `object.c` `getDecodedObject`;
-  - only needs to know → object free (calls `release()`), `MEMORY USAGE`,
-    `allocator_defrag.c` / active defrag, `OBJECT ENCODING`.
+  `OBJ_ENCODING_RAW` and sort it into the four buckets from §7.1:
+  - client read -> promote to RAW and mark the key hot;
+  - other plaintext egress -> use a temporary value for `cluster.c` (`DUMP`),
+    replication materialization, and `debug.c` (`DEBUG DIGEST`);
+  - preserve representation -> RDB save;
+  - inspect or release only -> object free (calls `release()`), `MEMORY USAGE`,
+    `allocator_defrag.c` / active defrag, and `OBJECT ENCODING`.
   `src/object.c` alone has ~10 `OBJ_ENCODING_RAW` sites; treat the audit as a
   tracked checklist, not a grep-and-hope.
 
@@ -167,8 +162,7 @@ so it deserves the widest test net.
 - Bump the version from `signalModifiedKey()` (`src/db.c:785`) and
   `dbUnshareStringValue()` (`src/db.c:605`).
 - Global `keyspace_epoch` bumped by `FLUSHALL`, `FLUSHDB`, `SWAPDB`.
-- Version compare on install, and on restoring or dropping a view — compare
-  versions, never pointers (§6.2).
+- Version compare on worker-result install - compare versions, never pointers (§6.3).
 
 **Done when:** unit tests cover install-on-match and discard-on-mismatch; a TCL
 test hammers one key with `SETBIT` while a job is pending and shows no stale
@@ -179,7 +173,8 @@ install.
 **Goal:** off-main-thread compression that cannot race the keyspace.
 
 - `src/compressor_worker.c` — pool of `compression-threads`, job queue,
-  `compression-inflight-max-bytes` cap, `compression_cpulist` pinning.
+  `compression-max-inflight-requests` and `compression-inflight-max-bytes`
+  caps, `compression_cpulist` pinning.
 - Enqueue copies the bytes into a job-owned buffer (§5.2). The worker never
   touches the keyspace.
 - Drain on the main thread: version check, then install or discard, then count.
@@ -190,30 +185,41 @@ clean `DEBUG DIGEST` against an uncompressed run.
 
 ### Phase 6 — the sweeper
 
-**Goal:** find cold candidates and pace by CPU.
+**Goal:** find cold candidates with bounded main-thread work and queue backpressure.
 
-- `compressionCron()` on the cron tick, budget
-  `budget_us = (1_000_000 / server.hz) * compression-sweep-max-cpu-pct / 100`,
-  which is 25 ms at defaults. Model it on the active-expire cycle so the pacing
-  code looks familiar.
-- Eligibility per §5.1: active dictionary, `OBJ_STRING`, `OBJ_ENCODING_RAW`,
-  `refcount == 1`, size window, cold by idle time or LFU.
+- `compressionCron()` inspects at most
+  `compression-sweep-max-keys-per-tick` keys per cron call, 100 by default, and
+  preserves its cursor across calls.
+- Enqueue only while queued plus running jobs are below
+  `compression-max-inflight-requests`, 100 by default, and owned snapshots stay
+  below `compression-inflight-max-bytes`, 32 MiB by default. Stop on either cap
+  and resume after completions release capacity.
+- Eligibility per §6.1: active dictionary, `OBJ_STRING`, `OBJ_ENCODING_RAW`,
+  `refcount == 1`, size window, absent from the hot-key LRU, and cold by idle
+  time or LFU.
+- A bounded 100,000-entry hot-key LRU. Every client read inserts or refreshes
+  the key; entries expire after `compression-min-idle-seconds`, and the
+  sweeper skips matches before copying candidate bytes.
 - Cursor that survives keyspace changes, resize, and `FLUSHALL`.
 
-**Done when:** a TCL test fills cold data, waits, and shows
-`INFO compression` savings rising; a second test shows a hot keyspace is left
-alone; a third shows the sweeper's share of a tick stays near the budget.
+**Done when:** unit tests prove that one cron call never inspects more than the
+configured key count, no job is accepted above either in-flight cap, and
+capacity is restored after completion. A TCL test fills cold data, waits, and
+shows `INFO compression` savings rising; another reads a compressed key, shows
+that it becomes RAW, and confirms repeated reads do not cause decompression or
+recompression churn while its hot-key entry is live.
 
 ### Phase 7 — configuration, INFO, commands
 
 - Five primary configs from §8. `compression-mode`, `compression-threads` and
   `compression-dict-size` are read once at startup, and `CONFIG SET` against
   them is rejected — follow the `*_cpulist` pattern in `src/config.c`.
-- The 14 advanced settings stay **hardcoded** in v1 (§8 "Advanced settings
+- The 15 advanced settings stay **hardcoded** in v1 (§8 "Advanced settings
   (v2)"). Put each default in one named constant so exposing it later is a
   one-line change.
-- `INFO compression`: savings, live and lifetime ratio, queue depth, stale jobs,
-  training state, errors.
+- `INFO compression`: savings, live and lifetime ratio, keys inspected,
+  in-flight requests and bytes, request-cap and byte-cap backpressure stops,
+  stale jobs, training state, errors.
 - `COMPRESSION TRAIN` for manual retraining, and the subcommand shape in
   `src/commands/`.
 - `valkey.conf` documentation for the five primary settings.
@@ -222,38 +228,48 @@ alone; a third shows the sweeper's share of a tick stays near the budget.
 startup-only settings reject `CONFIG SET`, and `CONFIG GET compression-*`
 returns only the v1 set.
 
-### Phase 8 — the scope-cut tests
+### Phase 8 — persistence and transfer tests
 
-These protect the §3 promise, which is the most valuable invariant in the
-design, so they get their own phase.
+These protect the representation boundaries in §3 and §4.
 
-- RDB written with compression on is **byte-identical** to one written with
-  compression off, for the same data set. No `RDB_VERSION` bump.
-- `DUMP`/`RESTORE` round-trip across a compressed and an uncompressed instance.
-- Full sync from a compressed primary to a replica with compression off, and the
-  reverse.
-- AOF rewrite and load with compression on.
-- `rdbLoad` inline compression path, once it exists.
-- `MIGRATE` between a compressed and an uncompressed node.
-- Restart: keyspace comes back plain, and a primary and replica running
-  different modes stay consistent.
+- RDB save/load preserves plain and compressed values as-is, persists every
+  referenced dictionary, and rejects a missing dictionary, unsupported
+  algorithm, unknown frame version, or malformed frame.
+- `DUMP`/`RESTORE` round-trip across compressed and uncompressed instances.
+- Full sync from a compressed primary to a replica with compression off, and
+  the reverse; the RDB baseline preserves frames and buffered commands remain
+  logical and uncompressed.
+- AOF rewrite with `aof-use-rdb-preamble yes`: the RDB base preserves compressed
+  frames and dictionaries; incremental AOF files replay uncompressed commands.
+- AOF rewrite with `aof-use-rdb-preamble no`: the base contains uncompressed
+  logical commands, loads without compression dictionaries, and does not change
+  the primary's in-memory representation during rewrite.
+- A mixed multipart AOF restores compressed values from its RDB base and then
+  applies uncompressed updates from incremental files.
+- A corrupted or unsupported compressed frame in an RDB-format AOF base fails
+  with the same checks as direct RDB load.
+- `MIGRATE` between compressed and uncompressed nodes sends logical values and
+  leaves the source representation unchanged.
 
-**Done when:** all of the above live in `tests/unit/compression.tcl` and
-`tests/integration/`, and the suite passes with `compression-mode` forced on for
-a full run of the existing tests.
+**Done when:** all cases live in `tests/unit/compression.tcl` and
+`tests/integration/`, both AOF preamble settings pass rewrite and restart tests,
+and the existing suite passes with `compression-mode` forced on.
 
 ### Phase 9 — measurement
 
-Two jobs: prove the targets, and settle §6.3 with data.
+Two jobs: prove the targets, and validate the hot-key promotion policy.
 
-- Memory saving on a JSON-like data set, target ≥30%.
+- Memory saving on a JSON-like data set, target >=30%.
 - TPS cost under mixed read/write load, target under 20%.
-- Per-read decompress latency by value size, and the effect of the 128 KiB cap.
-- **Reads per compressed lifetime** — the number that decides A vs B (§6.3).
+- First-read promotion latency by value size, and the effect of the 128 KiB cap.
+- Steady-state latency for repeated reads after a value becomes RAW.
+- Hot-key LRU lookup cost, memory, expiry, and capacity churn with working sets
+  below and above 100,000 keys.
 - Sweeper convergence time on a large keyspace, and recovery time after a wide
-  read pass.
+  read pass promotes many values.
 
-**Done when:** the numbers are in the issue and §6.3 is closed.
+**Done when:** the numbers are in the issue and either confirm the 100,000-entry
+bound or justify a measured replacement.
 
 ---
 
@@ -263,11 +279,12 @@ Two jobs: prove the targets, and settle §6.3 with data.
 |---|---|---|
 | A missed `obj->encoding` read site | Silent wrong data returned to a client | Phase 3 checklist, `DEBUG DIGEST` equivalence in every later phase |
 | Frame header alignment or offset bug | An sds `buf` is not 4-byte aligned, so a `uint32_t *` cast onto it is undefined behavior | Named offsets, `static_assert` on `offsetof`, single `memcpy`, no struct cast |
-| A decompressed view sent without a copy | `addReplyBulk()` may hold a raw pointer into the view's sds, so a stack view panics on `incrRefCount()` and a freed buffer corrupts the reply | §6.2 option 1: heap view, refcount 1, ownership passed to the reply layer |
-| §6.3 chosen wrong | Either dead machinery or a keyspace that never converges | Start with the A-variant, decide with phase 9 numbers |
+| Hot-key LRU is too small | Entries churn out and active keys are compressed, promoted, and compressed again | Keep the idle/LFU gate, report capacity evictions and sweeper skips, and test working sets above 100,000 keys |
+| Promotion breaks reply ownership | A later write could free bytes still queued for a copy-avoided reply | Install a normal heap RAW object before replying and rely on the existing object refcount path |
+| A wide read pass promotes much of the keyspace | Memory can move toward the uncompressed baseline until untouched values cool and are swept again | Bound read size, track promotion memory, and measure recompression convergence |
 | Vendoring zstd | New dependency, licence and build-matrix work | Phase 1 alone; keep the LZ4 path buildable without zstd |
 | Name collision with the existing stream compression code | Confusing review, accidental reuse | `compressor_alg*` files, `compressorApi` / `compressorAlg` types |
-| Forgetting to shrink the frame after compress | Reported savings exceed real savings | Assert real length ≤ bound and shrink in the one build helper |
+| Forgetting to shrink the frame after compress | Reported savings exceed real savings | Assert real length <= bound and shrink in the one build helper |
 
 ---
 
