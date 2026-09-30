@@ -146,7 +146,17 @@ Retraining is triggered by drift: when the live compression ratio gets clearly w
 
 ### 6.1 Choosing a value
 
-The sweeper takes a value only if a compression backend is active and the value is `OBJ_STRING`, `OBJ_ENCODING_RAW`, sole-owner (`refcount == 1`), within the size limits, absent from the internal hot-key LRU (§7.3), and **cold** — idle long enough, or low LFU frequency. The checks are additive: the LRU blocks recently touched keys even before the regular object metadata is evaluated, while the existing idle/LFU gate remains a fallback if the bounded LRU evicts an entry. Compressing a hot key would waste worker CPU and make its next read pay synchronous decompression again.
+On each `compressionCron()` call, the sweeper first checks `compression-max-inflight-requests`. An in-flight request remains counted from enqueue until the main thread installs or discards its result, including queued, running, and completed-but-not-drained jobs. If the in-flight count has reached `compression-max-inflight-requests`, 100 by default, the sweeper does not sample.
+
+When capacity exists, the sampling budget per cron call is `compression-max-inflight-requests` returned entries, 100 by default. It is not controlled by another setting. The sweeper chooses a non-empty database with probability proportional to its key count, selects one of that database's hashtables with `kvstoreGetFairRandomHashtableIndex()`, and calls `kvstoreHashtableSampleEntries()` for up to the remaining budget. If the selected hashtable has fewer entries, it repeats the database and hashtable selection until the budget is exhausted or the in-flight request cap is reached. The kvstore helper excludes importing hashtables.
+
+`kvstoreHashtableSampleEntries()` returns no more entries than requested and does not return the same entry twice within one call. Samples can repeat across cron calls, and no cursor or completed-pass state is kept. Selection is therefore probabilistic rather than an eventual-coverage guarantee. `INFO compression` reports sampled entries and eligibility rejection reasons so operators can measure repeated work and convergence as the share of compressed values rises.
+
+The sweeper reads each sampled database entry directly. Sampling must not perform a normal key lookup, refresh LRU/LFU metadata, or add the key to the hot-key LRU. Candidate discovery is not a client access.
+
+A sampled value is cold according to the access metadata selected by the maxmemory policy. In LFU mode, the sweeper applies normal LFU decay and accepts a frequency at or below `compression-lfu-threshold`, 5 by default. In LRU and `noeviction` modes, it accepts an idle time at or above `compression-min-idle-seconds`, 60 seconds by default. The object's 24-bit field stores one of these forms, so the sweeper never applies both tests.
+
+After the coldness test, the sweeper takes a value only if a compression backend is active and the value is `OBJ_STRING`, `OBJ_ENCODING_RAW`, sole-owner (`refcount == 1`), within the size limits, and absent from the internal hot-key LRU (§7.3). The hot-key LRU is an independent first-line exclusion: it blocks recently read keys before object metadata is evaluated, while the policy-specific coldness gate remains a fallback if that bounded LRU evicts an entry. Compressing a hot key would waste worker CPU and make its next read pay synchronous decompression again.
 
 Dictionary-capable modes use the active dictionary when one is available. A backend may also create a frame without a dictionary—for example, an LZ4 configuration that does not use one—in which case `dict_id` is zero. The frame still records the algorithm and format needed to decode it (§6.4).
 
@@ -172,16 +182,11 @@ Two rules keep this honest. The list does **not** need to be complete: the net-s
 
 `INFO compression` counts values skipped this way, so an operator can see that a keyspace is full of images instead of guessing why the ratio is flat.
 
-The sweeper does not use a wall-clock or CPU-percentage budget. Compression itself runs in workers; the main-thread work is candidate inspection and the owned snapshot copy. Each `compressionCron()` call therefore inspects at most `compression-sweep-max-keys-per-tick` keys, 100 by default, and keeps its cursor for the next tick.
+The sweeper does not use a wall-clock or CPU-percentage budget. Candidate work per cron call is bounded by `compression-max-inflight-requests`, 100 returned entries by default. At the default and `server.hz = 10`, it evaluates at most 1,000 sampled entries per second, and less when the request cap is full.
 
-For each eligible key, the sweeper enqueues a job only when both in-flight limits have room:
+For each eligible value, the main thread reserves one in-flight request slot before copying and enqueueing it. The reservation is released only after the main thread installs or discards the result. This keeps queued, running, and completed-but-not-drained work within `compression-max-inflight-requests`, 100 by default.
 
-- `compression-max-inflight-requests`, 100 by default, caps queued plus running jobs.
-- `compression-inflight-max-bytes`, 32 MiB by default, caps bytes owned by those jobs.
-
-The sweeper stops immediately when either limit is reached and resumes on a later cron tick after completions release capacity. The request cap provides queue backpressure and bounds per-job overhead. The byte cap is still required because value sizes vary and `compression-max-value-size` can be raised or disabled. A request-count cap alone would not bound snapshot memory.
-
-At the defaults and `server.hz = 10`, the sweeper examines at most 1,000 keys per second and keeps at most 100 compression jobs in flight. If all selected values are at the default 128 KiB maximum, those 100 snapshots occupy at most 12.5 MiB, below the 32 MiB byte cap.
+A separate in-flight byte cap is unnecessary because `compression-max-value-size` is a finite hard limit. It defaults to 128 KiB, cannot be disabled, and cannot be raised above 128 KiB. Therefore 100 in-flight jobs own at most 12.5 MiB of input snapshots. Output allocation is also bounded: only running workers allocate a worst-case destination, and `compression-threads` is 1 by default and at most 16. A worker frees its input snapshot before publishing a completed output, so queued and completed representations do not accumulate both buffers for the same job.
 
 ### 6.2 The worker must not race the main thread
 
@@ -352,7 +357,7 @@ All names are ordinary `CONFIG GET` / `CONFIG SET` settings, except `compression
 | `compression-mode` | `off`, `lz4`, `zstd` | `off` | The main switch. Off, or the algorithm to compress with — the background sweeper runs automatically whenever it's not `off`. | **No — startup only.** |
 | `compression-threads` | `0`–`16` | `1` | Worker pool size, fixed at startup. `0` means the feature never starts a pool. | **No — startup only.** |
 | `compression-min-value-size` | bytes | `256` | Smallest value worth compressing. | Yes |
-| `compression-max-value-size` | bytes, `0` = no cap | `131072` (128 KiB) | Largest value. Caps worst-case per-read latency. | Yes |
+| `compression-max-value-size` | `1`-`131072` bytes; must be at least the minimum | `131072` (128 KiB) | Largest value. Hard cap for per-value decompression and compression-job memory. | Yes |
 | `compression-dict-size` | bytes | `102400` (100 KiB) | Target size of a trained compression dictionary. | **No — startup only.** |
 
 **The mode names the algorithm, so there is no separate `compression-alg`.** One switch says both *whether* to compress and *how*. An operator cannot express the broken state "compression on, no backend chosen."
@@ -369,10 +374,7 @@ None of these are configurable in v1 — the mechanisms behind them run with the
 
 | Name | Values | Default | What it does | Change at runtime |
 |---|---|---|---|---|
-| `compression-inflight-max-bytes` | bytes | `33554432` (32 MiB) | Cap on snapshot bytes queued to workers. | No |
-| `compression-automatic-sweeper-interval` | seconds, `0` = keep cycling | `0` | Pause between sweeper passes. | No |
-| `compression-sweep-max-keys-per-tick` | keys | `100` | Maximum keys inspected by one `compressionCron()` call. | No |
-| `compression-max-inflight-requests` | requests | `100` | Cap on queued plus running compression jobs. | No |
+| `compression-max-inflight-requests` | requests | `100` | Cap on queued, running, and completed-but-not-drained compression jobs. | No |
 | `compression-min-savings-ratio` | percent | `10` | Net-savings guard. Below this, the frame is thrown away. | No |
 | `compression-min-idle-seconds` | seconds | `60` | Coldness gate in LRU and noeviction modes, and hot-key LRU entry lifetime in every mode. | No |
 | `compression-hot-key-lru-max-entries` | entries | `100000` | Maximum recently read keys excluded from background compression (§7.3). | No |
@@ -385,13 +387,12 @@ None of these are configurable in v1 — the mechanisms behind them run with the
 | `compression-dict-max-versions` | `2` or more | `4` | How many compression dictionaries may be live at once (§5). | No |
 | `compression_cpulist` | CPU list string | `""` | Pins the worker threads. | No |
 
-**Four bounds that matter in production:**
-- `compression-max-value-size` (128 KiB) bounds worst-case synchronous promotion and decompression work for one value.
-- `compression-sweep-max-keys-per-tick` (100) bounds main-thread candidate inspection per cron call.
-- `compression-max-inflight-requests` (100) bounds queue and worker-job overhead.
-- `compression-inflight-max-bytes` (32 MiB) bounds snapshot memory even when values have different sizes or `compression-max-value-size` is raised.
+**Three controls bound background compression:**
+- `compression-max-value-size` is finite and at most 128 KiB, bounding one input snapshot and one compression operation.
+- `compression-max-inflight-requests` is 100, bounding job count and input snapshots to at most 12.5 MiB.
+- `compression-threads` defaults to 1 and is at most 16, bounding concurrent compression and worst-case output allocations.
 
-`INFO compression` reports savings, live and lifetime ratio, keys inspected, in-flight requests and bytes, request-cap and byte-cap backpressure stops, stale jobs, training state, and errors.
+`INFO compression` reports savings, live and lifetime ratio, sampled entries, eligibility rejections by reason, in-flight requests, request-cap stops, stale jobs, training state, and errors.
 
 ---
 

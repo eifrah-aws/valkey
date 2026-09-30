@@ -98,7 +98,7 @@ These were argued out and closed. Do not reopen them without a new reason.
    because it allowed a silent no-op state (`mode=zstd` plus
    `sweeper=disabled`). The sweeper now runs whenever `compression-mode` is not
    `off`.
-7. **The 15 advanced settings are v2.** In v1 they are hardcoded defaults, not
+7. **The 12 advanced settings are v2.** In v1 they are hardcoded defaults, not
    `CONFIG` names. Reason: none of the numbers behind them are backed by measured
    tests yet.
 8. **Removed from the design on purpose:** the cost estimate section, the "what
@@ -115,14 +115,26 @@ These were argued out and closed. Do not reopen them without a new reason.
 ### Where the sweeper runs
 
 The sweeper runs in `compressionCron` on the cron tick. It does not use a CPU
-percentage or wall-clock budget. Each call inspects at most
-`compression-sweep-max-keys-per-tick` keys, 100 by default, and preserves its
-cursor for the next tick. It enqueues only while both
-`compression-max-inflight-requests` (100) and
-`compression-inflight-max-bytes` (32 MiB) have room. It stops on either cap and
-resumes after workers release capacity. It does **not** run in `beforeSleep`.
-Client reads promote compressed values to RAW immediately on the main thread;
-there is no transient decompressed view to restore.
+percentage, wall-clock budget, scan cursor, or completed-pass state. If the
+in-flight count has reached `compression-max-inflight-requests`, 100 by default,
+it returns without sampling. Otherwise it chooses a non-empty database
+proportional to key count, chooses a hashtable with
+`kvstoreGetFairRandomHashtableIndex()`, and obtains candidates with
+`kvstoreHashtableSampleEntries()`. It evaluates at most
+`compression-max-inflight-requests` returned entries per tick, 100 by default.
+Samples are unique within one helper call but may repeat across ticks, so
+convergence is probabilistic and must be measured.
+
+A request counts from enqueue through main-thread drain, including queued,
+running, and completed-but-not-drained jobs. `compression-max-inflight-requests`
+is 100. `compression-max-value-size` is finite, defaults to 128 KiB, cannot be
+disabled, and cannot exceed 128 KiB. These two controls bound input snapshots to
+12.5 MiB. `compression-threads` defaults to 1 and cannot exceed 16, bounding
+concurrent output allocations. There is no separate in-flight byte cap.
+
+The sweeper does **not** run in `beforeSleep`. Client reads promote compressed
+values to RAW immediately on the main thread; there is no transient decompressed
+view to restore.
 
 ---
 

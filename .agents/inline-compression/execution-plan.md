@@ -173,52 +173,69 @@ install.
 **Goal:** off-main-thread compression that cannot race the keyspace.
 
 - `src/compressor_worker.c` — pool of `compression-threads`, job queue,
-  `compression-max-inflight-requests` and `compression-inflight-max-bytes`
-  caps, `compression_cpulist` pinning.
+  `compression-max-inflight-requests` cap, `compression_cpulist` pinning.
 - Enqueue copies the bytes into a job-owned buffer (§5.2). The worker never
-  touches the keyspace.
-- Drain on the main thread: version check, then install or discard, then count.
+  touches the keyspace. A job remains counted while queued, running, or waiting
+  for the main thread to drain its completed result.
+- Enforce the finite `compression-max-value-size` before reserving a request
+  slot. At the 128 KiB maximum and 100-request cap, input snapshots occupy at
+  most 12.5 MiB. A worker frees the snapshot before publishing its output.
+- Drain on the main thread: version check, then install or discard, then release
+  the request slot.
 
-**Done when:** unit tests for queue accounting and the byte cap; a TCL test
-under `--accurate` runs a write-heavy load with the pool active and ends with a
-clean `DEBUG DIGEST` against an uncompressed run.
+**Done when:** unit tests prove request accounting across queued, running, and
+completed-but-not-drained states; reject a 128 KiB plus 1 byte value; and prove
+that `compression-max-value-size` cannot be disabled or raised above 128 KiB. A
+TCL test under `--accurate` runs a write-heavy load with the pool active and
+ends with a clean `DEBUG DIGEST` against an uncompressed run.
 
 ### Phase 6 — the sweeper
 
 **Goal:** find cold candidates with bounded main-thread work and queue backpressure.
 
-- `compressionCron()` inspects at most
-  `compression-sweep-max-keys-per-tick` keys per cron call, 100 by default, and
-  preserves its cursor across calls.
-- Enqueue only while queued plus running jobs are below
-  `compression-max-inflight-requests`, 100 by default, and owned snapshots stay
-  below `compression-inflight-max-bytes`, 32 MiB by default. Stop on either cap
-  and resume after completions release capacity.
-- Eligibility per §6.1: active dictionary, `OBJ_STRING`, `OBJ_ENCODING_RAW`,
-  `refcount == 1`, size window, absent from the hot-key LRU, and cold by idle
-  time or LFU.
+- If `compression-max-inflight-requests` is full, return without sampling.
+- Otherwise inspect at most `compression-max-inflight-requests` returned entries
+  per cron call, 100 by default. Choose a non-empty database with probability
+  proportional to its key count, select a hashtable with
+  `kvstoreGetFairRandomHashtableIndex()`, and use
+  `kvstoreHashtableSampleEntries()` for the remaining sample budget. Repeat
+  selection when a chosen hashtable contains fewer entries.
+- Consume sampled database entries directly on the main thread. Do not perform
+  a touching lookup or retain an entry pointer after the cron call.
+- Enqueue only while queued, running, and completed-but-not-drained jobs remain
+  below `compression-max-inflight-requests`, 100 by default. Reserve before the
+  snapshot copy and release only after main-thread drain.
+- Eligibility per §6.1: active backend, `OBJ_STRING`, `OBJ_ENCODING_RAW`,
+  `refcount == 1`, finite size window, absent from the hot-key LRU, and cold by
+  the policy-specific LRU or LFU test.
 - A bounded 100,000-entry hot-key LRU. Every client read inserts or refreshes
   the key; entries expire after `compression-min-idle-seconds`, and the
   sweeper skips matches before copying candidate bytes.
-- Cursor that survives keyspace changes, resize, and `FLUSHALL`.
+- No scan cursor or pass state. Samples are unique within one helper call but
+  may repeat across ticks; report sampling and eligibility rejection counters
+  to make probabilistic convergence visible.
 
-**Done when:** unit tests prove that one cron call never inspects more than the
-configured key count, no job is accepted above either in-flight cap, and
-capacity is restored after completion. A TCL test fills cold data, waits, and
-shows `INFO compression` savings rising; another reads a compressed key, shows
-that it becomes RAW, and confirms repeated reads do not cause decompression or
-recompression churn while its hot-key entry is live.
+**Done when:** unit tests prove that one cron call evaluates at most the configured
+`compression-max-inflight-requests` returned entries, a full request queue
+performs no sampling, hashtable choice is weighted by key count, importing
+hashtables are excluded, sampling does not touch access metadata, and sampled
+pointers are not retained. Queue tests prove no job is accepted above the
+configured request limit and capacity is restored only after drain. A TCL test
+fills
+cold data, waits, and shows `INFO compression` savings rising; another reads a
+compressed key, shows that it becomes RAW, and confirms repeated reads do not
+cause decompression or recompression churn while its hot-key entry is live.
 
 ### Phase 7 — configuration, INFO, commands
 
 - Five primary configs from §8. `compression-mode`, `compression-threads` and
   `compression-dict-size` are read once at startup, and `CONFIG SET` against
   them is rejected — follow the `*_cpulist` pattern in `src/config.c`.
-- The 15 advanced settings stay **hardcoded** in v1 (§8 "Advanced settings
+- The 12 advanced settings stay **hardcoded** in v1 (§8 "Advanced settings
   (v2)"). Put each default in one named constant so exposing it later is a
   one-line change.
-- `INFO compression`: savings, live and lifetime ratio, keys inspected,
-  in-flight requests and bytes, request-cap and byte-cap backpressure stops,
+- `INFO compression`: savings, live and lifetime ratio, sampled entries,
+  eligibility rejections by reason, in-flight requests, request-cap stops,
   stale jobs, training state, errors.
 - `COMPRESSION TRAIN` for manual retraining, and the subcommand shape in
   `src/commands/`.
@@ -265,8 +282,9 @@ Two jobs: prove the targets, and validate the hot-key promotion policy.
 - Steady-state latency for repeated reads after a value becomes RAW.
 - Hot-key LRU lookup cost, memory, expiry, and capacity churn with working sets
   below and above 100,000 keys.
-- Sweeper convergence time on a large keyspace, and recovery time after a wide
-  read pass promotes many values.
+- Random-sampling convergence time on large keyspaces, eligibility rejection
+  rates as the compressed share rises, and recovery time after a wide read pass
+  promotes many values.
 
 **Done when:** the numbers are in the issue and either confirm the 100,000-entry
 bound or justify a measured replacement.
