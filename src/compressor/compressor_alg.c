@@ -8,7 +8,7 @@
  * compressor_alg_lz4.c and compressor_alg_zstd.c, and this file is the only place
  * that knows which ids map to which function table. */
 
-#include "compressor_alg.h"
+#include "compressor/compressor_alg.h"
 #include "server.h" /* C_OK, C_ERR */
 #include "serverassert.h"
 #include "zmalloc.h"
@@ -80,6 +80,12 @@ const char *compressorStrerror(int err) {
     case COMPRESSOR_ERR_BAD_SIZE: return "value size out of range for this backend";
     case COMPRESSOR_ERR_COMPRESS: return "compression failed";
     case COMPRESSOR_ERR_DECOMPRESS: return "decompression failed";
+    case COMPRESSOR_ERR_FRAME_TOO_SHORT: return "frame is too short";
+    case COMPRESSOR_ERR_FRAME_VERSION: return "unknown frame format version";
+    case COMPRESSOR_ERR_FRAME_ALGORITHM: return "unknown frame algorithm";
+    case COMPRESSOR_ERR_FRAME_LENGTH: return "frame uncompressed length out of range";
+    case COMPRESSOR_ERR_ALGORITHM_MISMATCH: return "frame was built with another algorithm";
+    case COMPRESSOR_ERR_DICTIONARY_MISMATCH: return "frame dictionary does not match";
     default: return "unknown compressor error";
     }
 }

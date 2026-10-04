@@ -4,14 +4,14 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-/* Tests for the value compression backends. See src/compressor_alg.h. */
+/* Tests for the value compression backends. See src/compressor/compressor_alg.h. */
 
 #include "generated_wrappers.hpp"
 
 #include <string.h>
 
 extern "C" {
-#include "compressor_alg.h"
+#include "compressor/compressor_alg.h"
 #include "server.h"
 #include "zmalloc.h"
 }

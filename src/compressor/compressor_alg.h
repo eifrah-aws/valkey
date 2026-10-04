@@ -8,6 +8,7 @@
 #define COMPRESSOR_ALG_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 /* There are three objects here.
  *
@@ -30,9 +31,10 @@
  * are the exception and are shared on purpose, because they are read only once
  * loaded.
  *
- * The backend is picked once at startup from compression-mode and never changes
- * while the process runs. That is why a compressed frame carries no algorithm
- * tag. */
+ * The backend for new compression is picked once at startup from
+ * compression-mode and never changes while the process runs. Frames saved to
+ * RDB can outlive the process, so each frame still records its algorithm. See
+ * compressor_frame.h. */
 
 typedef struct compressorAlg compressorAlg;
 
@@ -57,6 +59,14 @@ typedef enum {
     COMPRESSOR_ERR_BAD_SIZE,   /* length out of range for this backend */
     COMPRESSOR_ERR_COMPRESS,   /* the library refused to compress */
     COMPRESSOR_ERR_DECOMPRESS, /* the library refused to decompress */
+
+    /* Frame errors, from compressor_frame.c. */
+    COMPRESSOR_ERR_FRAME_TOO_SHORT,     /* no body after the header */
+    COMPRESSOR_ERR_FRAME_VERSION,       /* unknown format_version */
+    COMPRESSOR_ERR_FRAME_ALGORITHM,     /* unknown algorithm_id */
+    COMPRESSOR_ERR_FRAME_LENGTH,        /* uncompressed_len is 0 or above the cap */
+    COMPRESSOR_ERR_ALGORITHM_MISMATCH,  /* frame needs another backend */
+    COMPRESSOR_ERR_DICTIONARY_MISMATCH, /* dictionary given or missing, against dict_id */
 } compressorErr;
 
 /* Largest dictionary each backend can use, in bytes. 0 means no limit.
@@ -80,6 +90,25 @@ typedef struct compressorConfig {
     size_t min_input_len; /* compression-min-value-size. 0 means no lower limit. */
     size_t max_input_len; /* compression-max-value-size. 0 means no upper limit. */
 } compressorConfig;
+
+/* A loaded dictionary. id is the value a frame writes to its dict_id field and
+ * is never 0. cdict is the digested form from compressorApi.dict_load() for
+ * algorithm_id. Keeping the three together means a caller can not write one
+ * dictionary's id with another dictionary's bytes.
+ *
+ * The dictionary registry (a later phase) owns these and keeps them alive while
+ * frames use them. */
+typedef struct compressorDict {
+    uint32_t id;
+    uint8_t algorithm_id;
+    void *cdict;
+} compressorDict;
+
+/* Returns 1 when dict holds a usable dictionary: a non-zero id and loaded
+ * data. It does not check that the dictionary fits a given frame or backend. */
+static inline int compressorDictIsValid(const compressorDict *dict) {
+    return dict != NULL && dict->id != 0 && dict->cdict != NULL;
+}
 
 /* The compression function table. One per backend, constant and shared.
  *
@@ -154,9 +183,9 @@ typedef struct compressorApi {
      * frame's dict_id field is what selects it. dstcap comes from the frame's
      * uncompressed_len field, so it is exact.
      *
-     * Returns the number of bytes written, or 0 on failure. A failure here is our
-     * own bug, never bad input, because frames never come from outside the
-     * process. The caller asserts. */
+     * Returns the number of bytes written, or 0 on failure. Frames loaded from
+     * RDB come from outside the process, so a failure can mean bad input. The
+     * caller must handle it and must not assert. */
     size_t (*decompress)(compressorAlg *instance,
                          void *cdict,
                          const void *body,
