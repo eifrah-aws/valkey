@@ -1363,6 +1363,9 @@ start_server {tags {"introspection"}} {
             rdma-bind
             rdma-port
             forkless-infrastructure-enabled
+            compression-mode
+            compression-threads
+            compression-dict-size
         }
 
         if {!$::tls} {

@@ -18,8 +18,9 @@ feature unreachable or safe when `compression-mode off` (the default).
 |---|---|---|
 | 0 - Compressor interface and LZ4 backend | DONE | `04bd1f1cb` |
 | 1 - Compression frame | DONE | "add the compression frame" |
-| 2 - Configuration | NEXT | - |
-| 3 to 11 | TODO | - |
+| 2 - Configuration | DONE, not committed | - |
+| 3 - Encoding and read paths | NEXT | - |
+| 4 to 11 | TODO | - |
 
 ## Phase 0 - Compressor interface and LZ4 backend (DONE)
 
@@ -48,13 +49,24 @@ These must be fixed in the design doc, or decided before the matching phase.
 2. **Net-savings guard.** Appendix A shows that the guard must compare
    allocation sizes (`zmalloc_size` / `sdsAllocSize`), not byte lengths. Section
    6.4 does not say that yet. The plan uses allocation sizes.
-3. **Read promotion hook point.** `DUMP`, `DEBUG DIGEST`, and migration also
-   use `lookupKeyRead*`. They must not promote (section 7.4). So promotion can
-   not live inside a generic lookup. Decision needed: a new
-   `LOOKUP_PROMOTE` flag, or a separate helper called only from client read
-   commands. Recommended: a separate helper `getStringValueForRead()` called
-   from string read commands, plus a generic fallback in `getDecodedObject()`
-   that only decompresses to a temporary object.
+3. **Read promotion hook point (decided: in `lookupKey()`).** When
+   `lookupKey()` in `src/db.c` finds a compressed string, it decompresses it,
+   stores the plain value in the keyspace, and returns it. Commands do not
+   change, so no command can get a frame by mistake. Modules are covered too
+   (`RM_StringDMA()`).
+   - New flag `LOOKUP_NODECOMPRESS`: return the value as it is, compressed or
+     not. Callers that use it must handle a compressed value.
+   - `LOOKUP_NOTOUCH` does not imply `LOOKUP_NODECOMPRESS`. A module can open
+     a key with NOTOUCH and still read its bytes.
+   - Use `LOOKUP_NODECOMPRESS` in: `DUMP`, `MIGRATE` (`src/cluster.c`),
+     `DEBUG DIGEST` / `DEBUG DIGEST-VALUE` (temporary decompress), and
+     `TYPE`, `EXISTS`, `TTL`/`PTTL`, `OBJECT`, `MEMORY USAGE` (they do not read
+     the bytes). Check each one in Phase 3.
+   - Cost: commands like `TOUCH` and `RENAME` also decompress. This is safe.
+     The sweeper compresses the key again later.
+   - RDB save, AOF rewrite, slot migration export, and the sweeper do not use
+     `lookupKey()`. They read the keyspace directly and must handle
+     compressed values themselves.
 4. **Name clash.** `src/compression.{c,h}` is the RDB / replication stream
    compression. Keep the `compressor_*` prefix for all new files. Check that
    `INFO compression` and the `COMPRESSION` command do not clash with
@@ -111,30 +123,38 @@ Commit "Inline compression: add the compression frame". No keyspace change.
   `src/` as the include root of `valkey-server`.
 - `src/unit/test_compressor_frame.cpp` (19 tests).
 
-## Phase 2 - Configuration
+## Phase 2 - Configuration (DONE, not committed)
 
-Goal: configs exist and are validated. Nothing compresses yet.
+Configs exist and are checked. Nothing compresses yet.
 
-- `src/config.c`:
-  - `compression-mode` startup only (`IMMUTABLE_CONFIG`). Accept only `off`
-    and `lz4`; reject anything else, `zstd` included, until Phase 7 adds the
-    backend.
-  - `compression-threads` 0-16, default 1, startup only.
-  - `compression-min-value-size` default 256, runtime.
-  - `compression-max-value-size` 1-131072, default 131072, runtime, must be
-    `>= min`.
-    The upper bound is `COMPRESSOR_FRAME_MAX_VALUE_LEN`, not a second literal.
-    A value above it is rejected with an error, never clamped.
-  - `compression-dict-size` default 102400, startup only.
-  - Open: `mode != off` with `threads == 0`. Recommended: allow it. It
-    means no background sweeper; inline compression (Phase 9), reads, and RDB
-    load still work on the main thread. Document this in `valkey.conf`.
-- `src/server.h`: hardcoded v1 constants for the "advanced (v2)" settings
-  (`COMPRESSION_MAX_INFLIGHT 100`, `MIN_SAVINGS_RATIO 10`,
-  `MIN_IDLE_SECONDS 60`, `HOT_LRU_MAX 100000`, `LFU_THRESHOLD 5`,
-  training constants, `DICT_MAX_VERSIONS 4`).
-- Tcl test `tests/unit/compression-config.tcl`: defaults, ranges,
-  `CONFIG SET` rejected for startup-only settings, min/max cross check.
+- New `src/compressor/compressor_config.{h,c}`:
+  - The limits and defaults of the settings.
+  - The fixed v1 values of the "advanced (v2)" settings
+    (`COMPRESSOR_MAX_INFLIGHT_REQUESTS`, `COMPRESSOR_MIN_SAVINGS_PCT`, ...).
+  - `compressorConfigCheck()`: min value size must not be greater than max.
+    It runs at startup (in `loadServerConfigFromString()`) and as the apply
+    function of CONFIG SET.
+- `src/config.c`, five settings:
+
+  | Name | Range | Default | Change at runtime |
+  |---|---|---|---|
+  | `compression-mode` | `off`, `lz4` | `off` | No |
+  | `compression-threads` | 0-16 | 1 | No |
+  | `compression-min-value-size` | 1-131072 | 256 | Yes |
+  | `compression-max-value-size` | 1-131072 | 131072 | Yes |
+  | `compression-dict-size` | 1024-1048576 | 102400 | No |
+
+  - `compression-mode` rejects every other value, `zstd` too, until Phase 7.
+  - `compression-threads 0` is allowed. It means no background compression.
+    Inline compression (Phase 9), reads, and RDB load still work.
+  - The max value size limit is `COMPRESSOR_FRAME_MAX_VALUE_LEN`. A bigger
+    value is rejected, never clamped.
+  - The `compression-dict-size` range is our choice. The design has no range.
+- `src/server.h`: `server.compression_*` fields.
+- `tests/unit/introspection.tcl`: the three startup-only settings are added
+  to the skip list of `CONFIG sanity`.
+- `tests/unit/compression-config.tcl` (7 tests).
+- Docs in `valkey.conf` come in Phase 11.
 
 ## Phase 3 - `OBJ_ENCODING_COMPRESSED` and the read/egress paths
 
@@ -160,9 +180,14 @@ Frames are created only by a debug command in this phase.
 - Audit all direct reads of `obj->encoding` / `objectGetEncoding()` for
   `OBJ_STRING`. Put each site in one of the four classes of design section 7.1
   and record the list in the PR description.
-- Read promotion helper (see "Facts" item 3): decompress, validate, replace
-  the value in the db, release the frame, record the key as hot (no-op until
-  Phase 4). On error keep the frame and reply with an error.
+- Promotion in `lookupKey()` (see "Facts" item 3): decompress, validate,
+  replace the value in the db, release the frame, record the key as hot
+  (no-op until Phase 4). Skip all of it when `LOOKUP_NODECOMPRESS` is set.
+  If decompression fails, call `serverPanic()`. Frames are checked when they
+  are made and when RDB loads, so a failure here means a bug or broken
+  memory. `lookupKey()` can not return an error: NULL means "no key".
+- Add `LOOKUP_NODECOMPRESS` in `src/server.h` and use it in the callers
+  listed in "Facts" item 3.
 - Mutation path: `dbUnshareStringValue()` and every string write command
   (`APPEND`, `SETRANGE`, `SETBIT`, `INCR*`, `GETSET`, `GETDEL`, `GETEX`,
   `SET ... GET`) first get the logical RAW value.
@@ -224,6 +249,15 @@ Goal: real background compression without dictionaries.
     `refcount == 1`, size window, not in the hot-key LRU, not already in
     flight, not expired.
   - Magic-byte skip table (design section 6.1), `memcmp` only.
+  - Dictionary rule (decided):
+    - `zstd`: do not compress until the first dictionary exists. The first
+      training starts at `COMPRESSOR_DICT_MIN_TRAINING_KEYS` keys. Reason:
+      without a dictionary small values save little, these frames are never
+      compressed again with the new dictionary, and training needs plain
+      sample values.
+    - `lz4`: compress without a dictionary (`dict_id` 0) from the start.
+    - Count values skipped while waiting for a dictionary in
+      `INFO compression`.
 - Drain completions on the main thread (cron or `beforeSleep`): check
   epoch, version, key still present, value still the same `robj`, then net
   savings guard, then install. Otherwise discard and count.
@@ -266,7 +300,9 @@ Goal: default algorithm and trained dictionaries.
   dependency early, because it may take time.
 - `src/compressor/compressor_alg_zstd.c` with `train` (ZDICT), `dict_load`
   (`ZSTD_createCDict` / `ZSTD_createDDict`), compress, decompress.
-- LZ4 dictionary bytes come from the zstd ZDICT trainer.
+- Open: does LZ4 also get dictionaries from the zstd ZDICT trainer? If yes,
+  LZ4 frames made before the first dictionary stay without one (the sweeper
+  only picks plain values).
 - Training job: sample up to `DICT_MAX_TRAINING_KEYS` values into a 16 MiB
   buffer on the main thread (bounded per cron call), train on a worker,
   install the new dictionary on the main thread with a new ID.

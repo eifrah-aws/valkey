@@ -536,6 +536,7 @@ ENGINE_SERVER_OBJ = \
     compression_stream.o \
     compressor/compressor_alg.o \
     compressor/compressor_alg_lz4.o \
+    compressor/compressor_config.o \
     compressor/compressor_frame.o \
     config.o \
     connection.o \

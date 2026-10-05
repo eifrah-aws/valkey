@@ -40,6 +40,7 @@
 #include "eval.h"
 #include "lrulfu.h"
 #include "throttle_repl.h"
+#include "compressor/compressor_config.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -193,6 +194,11 @@ configEnum cluster_replica_no_failover_enum[] = {{"no", CLUSTER_REPLICA_NO_FAILO
                                                  {"yes", CLUSTER_REPLICA_NO_FAILOVER_YES},
                                                  {"if-empty", CLUSTER_REPLICA_NO_FAILOVER_IF_EMPTY},
                                                  {NULL, 0}};
+
+/* Only the backends that exist. zstd is added with its backend. */
+configEnum compression_mode_enum[] = {{"off", COMPRESSOR_ALG_NONE},
+                                      {"lz4", COMPRESSOR_ALG_LZ4},
+                                      {NULL, 0}};
 
 configEnum repl_compression_enum[] = {{"no", REPL_COMPRESSION_NO},
                                       {"yes", REPL_COMPRESSION_YES},
@@ -671,6 +677,7 @@ void loadServerConfigFromString(sds config) {
         err = "replicaof directive not allowed in cluster mode";
         goto loaderr;
     }
+    if (!compressorConfigCheck(&err)) goto loaderr;
     if (server.bgsave_default_method == RDB_BGSAVE_TYPE_FORKLESS && !server.forkless_infrastructure_enabled) {
         err = "'bgsave-default-method forkless' can only be selected when the server was started with "
               "'forkless-infrastructure-enabled yes'";
@@ -3558,6 +3565,11 @@ standardConfig static_configs[] = {
     createEnumConfig("rdbcompression", NULL, MODIFIABLE_CONFIG, rdb_compression_enum, server.rdb_compression, RDB_COMPRESSION_YES, isValidRdbCompression, NULL),
     createEnumConfig("cluster-replica-no-failover", "cluster-slave-no-failover", MODIFIABLE_CONFIG, cluster_replica_no_failover_enum, server.cluster_replica_no_failover, CLUSTER_REPLICA_NO_FAILOVER_NO, NULL, updateClusterFlags), /* Failover by default. */
     createEnumConfig("repl-compression", NULL, MODIFIABLE_CONFIG, repl_compression_enum, server.repl_compression, REPL_COMPRESSION_NO, isValidReplCompression, NULL),
+    createEnumConfig("compression-mode", NULL, IMMUTABLE_CONFIG, compression_mode_enum, server.compression_mode, COMPRESSOR_ALG_NONE, NULL, NULL),
+    createIntConfig("compression-threads", NULL, IMMUTABLE_CONFIG, 0, COMPRESSOR_THREADS_MAX, server.compression_threads, COMPRESSOR_THREADS_DEFAULT, INTEGER_CONFIG, NULL, NULL),
+    createSizeTConfig("compression-min-value-size", NULL, MODIFIABLE_CONFIG, 1, COMPRESSOR_VALUE_SIZE_MAX, server.compression_min_value_size, COMPRESSOR_MIN_VALUE_SIZE_DEFAULT, MEMORY_CONFIG, NULL, compressorConfigCheck),
+    createSizeTConfig("compression-max-value-size", NULL, MODIFIABLE_CONFIG, 1, COMPRESSOR_VALUE_SIZE_MAX, server.compression_max_value_size, COMPRESSOR_MAX_VALUE_SIZE_DEFAULT, MEMORY_CONFIG, NULL, compressorConfigCheck),
+    createSizeTConfig("compression-dict-size", NULL, IMMUTABLE_CONFIG, COMPRESSOR_DICT_SIZE_MIN, COMPRESSOR_DICT_SIZE_MAX, server.compression_dict_size, COMPRESSOR_DICT_SIZE_DEFAULT, MEMORY_CONFIG, NULL, NULL),
 
     /* Integer configs */
     createIntConfig("databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases, 16, INTEGER_CONFIG, NULL, NULL),
