@@ -3,7 +3,7 @@ BEFORE YOU START CODING, EXPLAIN THE PLAN AND GET A CLEAR "YES" FROM THE USER. D
 
 # Inline In-memory Compression - Execution Plan
 
-Source design: `/Users/eifrah/devl/valkey-inline-compression-design/design-docs/inline-compression.md`
+Source design: `design-docs/inline-compression.md` (in this repo; the old copy in `valkey-inline-compression-design` is no longer used)
 Issue: valkey-io/valkey #3423
 Branch: `valkey-inline-compression`
 
@@ -445,8 +445,11 @@ results added to the design doc.
 - `valkey.conf` entries for the five settings, with the LZ4 vs zstd note.
 - `INFO compression` field list.
 - `COMPRESSION` command docs.
-- Update the design doc with the items in "Facts found in the code" and the
-  10-byte frame header (section 6.4).
+- Design doc: moved to `design-docs/inline-compression.md` and aligned with
+  the code up to Phase 3a (encoding 14, 10-byte header, allocation-size
+  savings check, byte compare, decompress in `lookupKey()`, plain copies
+  during a child and for module read handles). Keep it in step with each
+  later phase.
 
 ---
 
