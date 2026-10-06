@@ -149,3 +149,40 @@ start_server {tags {"modules"}} {
         assert_equal {OK} [r module unload scan]
     }
 }
+
+start_server {tags {"modules"} overrides {compression-mode lz4 maxmemory-policy allkeys-lfu}} {
+    r module load $testmodule
+
+    test {Module scan reads compressed string values} {
+        set v [string repeat {{"user_id":1,"role":"member"},} 40]
+        r set x $v
+        r set y $v
+        # With LFU a new key is cold, so the sweeper compresses it soon.
+        wait_for_condition 100 50 {
+            [r object encoding x] eq "compressed" && [r object encoding y] eq "compressed"
+        } else {
+            fail "values were not compressed"
+        }
+        set res [lsort [r scan.scan_strings]]
+        # A module scan reads a copy. The stored values stay compressed.
+        assert_equal compressed [r object encoding x]
+        assert_equal compressed [r object encoding y]
+        set res
+    } [list [list x [string repeat {{"user_id":1,"role":"member"},} 40]] [list y [string repeat {{"user_id":1,"role":"member"},} 40]]]
+
+    test {Module scan during a child process does not change compressed values} {
+        set v [string repeat {{"user_id":2,"role":"member"},} 40]
+        r flushall
+        r set x $v
+        wait_for_condition 100 50 {[r object encoding x] eq "compressed"} else { fail "x was not compressed" }
+        for {set i 0} {$i < 10} {incr i} { r set filler:$i 1 }
+        r config set rdb-key-save-delay 200000
+        r bgsave
+        wait_for_condition 50 20 {[s rdb_bgsave_in_progress] == 1} else { fail "no child" }
+        set res [r scan.scan_strings]
+        assert_equal compressed [r object encoding x]
+        r config set rdb-key-save-delay 0
+        waitForBgsave r
+        assert {[lsearch -exact $res [list x $v]] >= 0}
+    }
+}

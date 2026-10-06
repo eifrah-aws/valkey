@@ -36,6 +36,7 @@ TEST_MODULES = \
     blockonkeys.so \
     blockonbackground.so \
     scan.so \
+    compression.so \
     datatype.so \
     datatype2.so \
     auth.so \

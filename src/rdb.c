@@ -34,6 +34,7 @@
 
 #include "hashtable.h"
 #include "server.h"
+#include "compressor/compressor_object.h"
 #include "ordered_index.h"
 #include "lzf.h" /* LZF compression library */
 #include "zipmap.h"
@@ -595,6 +596,12 @@ ssize_t rdbSaveStringObject(rio *rdb, robj *obj) {
      * object is already integer encoded. */
     if (obj->encoding == OBJ_ENCODING_INT) {
         return rdbSaveLongLongAsStringObject(rdb, (long)objectGetVal(obj));
+    } else if (compressorIsCompressedString(obj)) {
+        /* Saved as a plain string for now. The RDB format change comes later. */
+        sds plain = compressorDecompressToSds(obj);
+        ssize_t written = rdbSaveRawString(rdb, (unsigned char *)plain, sdslen(plain));
+        sdsfree(plain);
+        return written;
     } else {
         serverAssertWithInfo(NULL, obj, sdsEncodedObject(obj));
         return rdbSaveRawString(rdb, objectGetVal(obj), sdslen(objectGetVal(obj)));

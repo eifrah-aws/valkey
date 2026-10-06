@@ -3566,7 +3566,7 @@ standardConfig static_configs[] = {
     createEnumConfig("cluster-replica-no-failover", "cluster-slave-no-failover", MODIFIABLE_CONFIG, cluster_replica_no_failover_enum, server.cluster_replica_no_failover, CLUSTER_REPLICA_NO_FAILOVER_NO, NULL, updateClusterFlags), /* Failover by default. */
     createEnumConfig("repl-compression", NULL, MODIFIABLE_CONFIG, repl_compression_enum, server.repl_compression, REPL_COMPRESSION_NO, isValidReplCompression, NULL),
     createEnumConfig("compression-mode", NULL, IMMUTABLE_CONFIG, compression_mode_enum, server.compression_mode, COMPRESSOR_ALG_NONE, NULL, NULL),
-    createIntConfig("compression-threads", NULL, IMMUTABLE_CONFIG, 0, COMPRESSOR_THREADS_MAX, server.compression_threads, COMPRESSOR_THREADS_DEFAULT, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("compression-threads", NULL, IMMUTABLE_CONFIG, COMPRESSOR_THREADS_MIN, COMPRESSOR_THREADS_MAX, server.compression_threads, COMPRESSOR_THREADS_DEFAULT, INTEGER_CONFIG, NULL, NULL),
     createSizeTConfig("compression-min-value-size", NULL, MODIFIABLE_CONFIG, 1, COMPRESSOR_VALUE_SIZE_MAX, server.compression_min_value_size, COMPRESSOR_MIN_VALUE_SIZE_DEFAULT, MEMORY_CONFIG, NULL, compressorConfigCheck),
     createSizeTConfig("compression-max-value-size", NULL, MODIFIABLE_CONFIG, 1, COMPRESSOR_VALUE_SIZE_MAX, server.compression_max_value_size, COMPRESSOR_MAX_VALUE_SIZE_DEFAULT, MEMORY_CONFIG, NULL, compressorConfigCheck),
     createSizeTConfig("compression-dict-size", NULL, IMMUTABLE_CONFIG, COMPRESSOR_DICT_SIZE_MIN, COMPRESSOR_DICT_SIZE_MAX, server.compression_dict_size, COMPRESSOR_DICT_SIZE_DEFAULT, MEMORY_CONFIG, NULL, NULL),

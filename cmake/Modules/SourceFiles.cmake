@@ -136,6 +136,8 @@ set(VALKEY_SERVER_SRCS
     ${CMAKE_SOURCE_DIR}/src/compressor/compressor_alg_lz4.c
     ${CMAKE_SOURCE_DIR}/src/compressor/compressor_config.c
     ${CMAKE_SOURCE_DIR}/src/compressor/compressor_frame.c
+    ${CMAKE_SOURCE_DIR}/src/compressor/compressor_object.c
+    ${CMAKE_SOURCE_DIR}/src/compressor/compressor_workers.c
     ${CMAKE_SOURCE_DIR}/src/hotkeys.c
     ${CMAKE_SOURCE_DIR}/src/space_saving.c
     ${CMAKE_SOURCE_DIR}/src/throttle_token_bucket.c

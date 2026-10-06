@@ -32,6 +32,8 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 #include "server.h"
+#include "compressor/compressor_object.h"
+#include "compressor/compressor_workers.h"
 #include "hotkeys.h"
 #include "ordered_index.h"
 #include "connection.h"
@@ -1690,6 +1692,9 @@ long long serverCron(struct aeEventLoop *eventLoop, long long id, void *clientDa
     /* Handle background operations on databases. */
     databasesCron();
 
+    /* Pick cold values for background compression. */
+    if (server.compression_mode != COMPRESSOR_ALG_NONE) compressorCron();
+
     /* Start a scheduled AOF rewrite if this was requested by the user while
      * a BGSAVE was in progress. We don't start the rewrite if there is an
      * active child process (to avoid multiple concurrent fork children) or if
@@ -1987,6 +1992,11 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
 
     /* Release keys from bgIteration before processing unblocked clients. */
     bgIteration_beforeSleep();
+
+    /* Install the values that the compressor threads finished, and release
+     * plain copies made outside a command. The second check matters once
+     * compressed values can be loaded from RDB with compression-mode off. */
+    if (server.compression_mode != COMPRESSOR_ALG_NONE || compressorHasPlainCopies()) compressorBeforeSleep();
     /* Handle blocked clients.
      * must be done before flushAppendOnlyFile, in case of appendfsync=always,
      * since the unblocked clients may write data. */
@@ -3392,6 +3402,7 @@ void initListeners(void) {
  * see: https://sourceware.org/bugzilla/show_bug.cgi?id=19329 */
 void InitServerLast(void) {
     bioInit();
+    compressorWorkersInit();
     initIOThreads(1);
     set_jemalloc_bg_thread(server.jemalloc_bg_thread);
 
@@ -4504,6 +4515,9 @@ void afterCommand(client *c) {
     }
 
     clusterSlotStatsAddNetworkBytesOutForUserClient(c);
+
+    /* Release the plain copies that compressed values got for this command. */
+    if (unlikely(compressorHasPlainCopies())) compressorAfterCall();
 }
 
 /* Check if c->cmd exists, fills `err` with details in case it doesn't.

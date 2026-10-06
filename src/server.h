@@ -824,21 +824,25 @@ typedef struct ValkeyModuleType moduleType;
 
 /* Objects encoding. Some kind of objects like Strings and Hashes can be
  * internally represented in multiple ways. The 'encoding' field of the object
- * is set to one of this fields for this object. */
-#define OBJ_ENCODING_RAW 0        /* Raw representation */
-#define OBJ_ENCODING_INT 1        /* Encoded as integer */
-#define OBJ_ENCODING_HASHTABLE 2  /* Encoded as a hashtable */
-#define OBJ_ENCODING_ZIPMAP 3     /* No longer used: old hash encoding. */
-#define OBJ_ENCODING_LINKEDLIST 4 /* No longer used: old list encoding. */
-#define OBJ_ENCODING_ZIPLIST 5    /* No longer used: old list/hash/zset encoding. */
-#define OBJ_ENCODING_INTSET 6     /* Encoded as intset */
-#define OBJ_ENCODING_BTREE 7      /* Encoded as B+tree (fbtree) */
-#define OBJ_ENCODING_EMBSTR 8     /* Embedded sds string encoding */
-#define OBJ_ENCODING_QUICKLIST 9  /* Encoded as linked list of listpacks */
-#define OBJ_ENCODING_STREAM 10    /* Encoded as a radix tree of listpacks */
-#define OBJ_ENCODING_LISTPACK 11  /* Encoded as a listpack */
-#define OBJ_ENCODING_LISTPACK2 12 /* Encoded as a listpack with metadata tag */
-#define OBJ_ENCODING_PATH_HASH 13 /* Path hash backed by a radix tree */
+ * is set to one of this fields for this object.
+ *
+ * The 'encoding' field has 4 bits, so an OBJ_ENCODING_* value must be in the
+ * range [0-15], both ends included. A value above 15 does not fit. */
+#define OBJ_ENCODING_RAW 0         /* Raw representation */
+#define OBJ_ENCODING_INT 1         /* Encoded as integer */
+#define OBJ_ENCODING_HASHTABLE 2   /* Encoded as a hashtable */
+#define OBJ_ENCODING_ZIPMAP 3      /* No longer used: old hash encoding. */
+#define OBJ_ENCODING_LINKEDLIST 4  /* No longer used: old list encoding. */
+#define OBJ_ENCODING_ZIPLIST 5     /* No longer used: old list/hash/zset encoding. */
+#define OBJ_ENCODING_INTSET 6      /* Encoded as intset */
+#define OBJ_ENCODING_BTREE 7       /* Encoded as B+tree (fbtree) */
+#define OBJ_ENCODING_EMBSTR 8      /* Embedded sds string encoding */
+#define OBJ_ENCODING_QUICKLIST 9   /* Encoded as linked list of listpacks */
+#define OBJ_ENCODING_STREAM 10     /* Encoded as a radix tree of listpacks */
+#define OBJ_ENCODING_LISTPACK 11   /* Encoded as a listpack */
+#define OBJ_ENCODING_LISTPACK2 12  /* Encoded as a listpack with metadata tag */
+#define OBJ_ENCODING_PATH_HASH 13  /* Path hash backed by a radix tree */
+#define OBJ_ENCODING_COMPRESSED 14 /* Compressed frame, see compressor/compressor_frame.h */
 
 #define OBJ_REFCOUNT_BITS 29
 #define OBJ_SHARED_REFCOUNT ((1 << OBJ_REFCOUNT_BITS) - 1) /* Global object never destroyed. */
@@ -2481,7 +2485,7 @@ struct valkeyServer {
     int lua_insecure_api_current;   /* Current value of if insecure apis are enabled, used to determine if flush is needed. */
     /* Inline compression. See compressor/compressor_config.h. */
     int compression_mode;              /* compressorAlgId, COMPRESSOR_ALG_NONE = off */
-    int compression_threads;           /* worker threads, 0 = no background compression */
+    int compression_threads;           /* worker threads */
     size_t compression_min_value_size; /* smallest value to compress */
     size_t compression_max_value_size; /* largest value to compress */
     size_t compression_dict_size;      /* size of a trained dictionary */
@@ -4004,6 +4008,10 @@ int objectSetLRUOrLFU(robj *val, long long lfu_freq, long long lru_idle_secs);
 #define LOOKUP_WRITE (1 << 3)     /* Delete expired keys even in replicas. */
 #define LOOKUP_NOEXPIRE (1 << 4)  /* Avoid deleting lazy expired keys. */
 #define LOOKUP_NOHOTKEYS (1 << 5) /* Don't feed hot-key detection (introspection). */
+/* Return a compressed value as it is. Without it, the lookup decompresses it.
+ * Not part of LOOKUP_NOEFFECTS: a module can open a key with NOEFFECTS and
+ * still read its bytes. */
+#define LOOKUP_NODECOMPRESS (1 << 6)
 #define LOOKUP_NOEFFECTS \
     (LOOKUP_NONOTIFY | LOOKUP_NOSTATS | LOOKUP_NOTOUCH | LOOKUP_NOEXPIRE | LOOKUP_NOHOTKEYS) /* Avoid any effects from fetching the key */
 

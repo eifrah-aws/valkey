@@ -1,4 +1,5 @@
 USE SIMPLE ENGLISH (CEFR B1) IN ALL TEXT: CODE COMMENTS, COMMIT MESSAGES, DOCS, AND THIS PLAN. SHORT SENTENCES. COMMON WORDS.
+BEFORE YOU START CODING, EXPLAIN THE PLAN AND GET A CLEAR "YES" FROM THE USER. DO NOT START CODING WITHOUT IT.
 
 # Inline In-memory Compression - Execution Plan
 
@@ -19,7 +20,8 @@ feature unreachable or safe when `compression-mode off` (the default).
 | 0 - Compressor interface and LZ4 backend | DONE | `04bd1f1cb` |
 | 1 - Compression frame | DONE | "add the compression frame" |
 | 2 - Configuration | DONE, not committed | - |
-| 3 - Encoding and read paths | NEXT | - |
+| 3a - Full cycle: encoding, read path, background workers | DONE, not committed | - |
+| 3b - Other read paths | NEXT | - |
 | 4 to 11 | TODO | - |
 
 ## Phase 0 - Compressor interface and LZ4 backend (DONE)
@@ -49,7 +51,7 @@ These must be fixed in the design doc, or decided before the matching phase.
 2. **Net-savings guard.** Appendix A shows that the guard must compare
    allocation sizes (`zmalloc_size` / `sdsAllocSize`), not byte lengths. Section
    6.4 does not say that yet. The plan uses allocation sizes.
-3. **Read promotion hook point (decided: in `lookupKey()`).** When
+3. **Where a read decompresses (decided: in `lookupKey()`).** When
    `lookupKey()` in `src/db.c` finds a compressed string, it decompresses it,
    stores the plain value in the keyspace, and returns it. Commands do not
    change, so no command can get a frame by mistake. Modules are covered too
@@ -80,10 +82,12 @@ These must be fixed in the design doc, or decided before the matching phase.
    `ZDICT` trainer for both.
 7. **Name clash for the hot-key LRU.** `src/hotkeys.c` already exists. Phase
    4 uses the `compressor_` prefix (`src/compressor/compressor_hotkeys.c`).
-8. **Unit tests on macOS.** `make -C src test-unit` fails with Apple clang,
-   because Homebrew `llc` can not read Apple LTO objects. It works with
-   `CC=/opt/homebrew/opt/llvm/bin/clang CXX=/opt/homebrew/opt/llvm/bin/clang++`
-   after `make -C src distclean`.
+8. **Unit tests on macOS.** Fixed upstream by `f213a6750` (#4657). Build them
+   with CMake. Pass `-DBUILD_UNIT_GTESTS=ON` on every `cmake ..`, because
+   `CMakeLists.txt` does not keep it in the cache:
+   `cd .build-debug && cmake .. -DCMAKE_BUILD_TYPE=Debug -DBUILD_UNIT_GTESTS=ON`
+   `&& cmake --build . -j10 --target valkey-unit-gtests`
+   Run them with `gtest-parallel` (see "Cross-cutting rules").
 
 ---
 
@@ -139,14 +143,13 @@ Configs exist and are checked. Nothing compresses yet.
   | Name | Range | Default | Change at runtime |
   |---|---|---|---|
   | `compression-mode` | `off`, `lz4` | `off` | No |
-  | `compression-threads` | 0-16 | 1 | No |
+  | `compression-threads` | 1-16 | 1 | No |
   | `compression-min-value-size` | 1-131072 | 256 | Yes |
   | `compression-max-value-size` | 1-131072 | 131072 | Yes |
   | `compression-dict-size` | 1024-1048576 | 102400 | No |
 
   - `compression-mode` rejects every other value, `zstd` too, until Phase 7.
-  - `compression-threads 0` is allowed. It means no background compression.
-    Inline compression (Phase 9), reads, and RDB load still work.
+  - `compression-threads` is 1-16 (changed in 3a). 0 is rejected.
   - The max value size limit is `COMPRESSOR_FRAME_MAX_VALUE_LEN`. A bigger
     value is rejected, never clamped.
   - The `compression-dict-size` range is our choice. The design has no range.
@@ -156,56 +159,116 @@ Configs exist and are checked. Nothing compresses yet.
 - `tests/unit/compression-config.tcl` (7 tests).
 - Docs in `valkey.conf` come in Phase 11.
 
-## Phase 3 - `OBJ_ENCODING_COMPRESSED` and the read/egress paths
+## Phase 3a - Full cycle: encoding, read path, background workers (DONE, not committed)
 
-Goal: a compressed value can exist in the keyspace and every path handles it.
-Frames are created only by a debug command in this phase.
+Goal: values are compressed in the background and decompressed on read, so
+we can run benchmarks. This also does most of Phase 5.
 
-- `src/server.h`: `#define OBJ_ENCODING_COMPRESSED 14`.
-- The main thread's compressors (moved from Phase 2): one `compressorAlg`
-  for each algorithm, only for the main thread. The main thread uses them to
-  decompress. Each one is created the first time it is needed. So frames from
-  RDB can be read even when the mode is `off`. Names:
-  `main_thread_compressors[COMPRESSOR_ALG_MAX]` and
-  `compressorGetForMainThread(algorithm_id)`.
-- `src/object.c`:
-  - `strEncoding()` returns `"compressed"`.
-  - `decrRefCount()` / free path calls the backend `release()` and drops the
-    dictionary user count (registry stub until Phase 6).
-  - `MEMORY USAGE` / `objectComputeSize()` counts the frame allocation.
-  - `getDecodedObject()` returns a temporary RAW copy for compressed values.
-  - `sdsEncodedObject()` must stay false for compressed values. Audit every
-    caller.
-  - Active defrag (`src/defrag.c`): move the frame like any sds.
-- Audit all direct reads of `obj->encoding` / `objectGetEncoding()` for
-  `OBJ_STRING`. Put each site in one of the four classes of design section 7.1
-  and record the list in the PR description.
-- Promotion in `lookupKey()` (see "Facts" item 3): decompress, validate,
-  replace the value in the db, release the frame, record the key as hot
-  (no-op until Phase 4). Skip all of it when `LOOKUP_NODECOMPRESS` is set.
-  If decompression fails, call `serverPanic()`. Frames are checked when they
-  are made and when RDB loads, so a failure here means a bug or broken
-  memory. `lookupKey()` can not return an error: NULL means "no key".
-- Add `LOOKUP_NODECOMPRESS` in `src/server.h` and use it in the callers
-  listed in "Facts" item 3.
-- Mutation path: `dbUnshareStringValue()` and every string write command
-  (`APPEND`, `SETRANGE`, `SETBIT`, `INCR*`, `GETSET`, `GETDEL`, `GETEX`,
-  `SET ... GET`) first get the logical RAW value.
-- Temporary-decompress egress paths: `DUMP` (payload must be plain; decide if
-  `RESTORE` payload format changes - recommended: no change), `DEBUG DIGEST`,
-  `DEBUG DIGEST-VALUE`, slot migration export, any propagation that
-  materializes a stored value, command-form AOF rewrite
-  (`aof-use-rdb-preamble no`).
-- RDB save in this phase: write compressed values as plain (temporary
-  decompress). Phase 8 replaces this with as-is save.
-- `DEBUG COMPRESS-KEY <key>` (sync, test only) to create frames.
-- Tests:
-  - Unit: object free / size with a frame.
-  - Tcl `tests/unit/compression-encoding.tcl`: `OBJECT ENCODING`, every string
-    read and write command on a compressed key, `DUMP`/`RESTORE`, `DEBUG
-    DIGEST` equal before and after compression, `MULTI` with read then write,
-    multi-key reads (`MGET`), keyspace notifications unchanged, replication
-    and AOF output stays plain, `SAVE` + `DEBUG RELOAD` keeps data.
+- `OBJ_ENCODING_COMPRESSED` (14) and `LOOKUP_NODECOMPRESS` in `src/server.h`.
+  `LOOKUP_NOEFFECTS` does not include `LOOKUP_NODECOMPRESS`: a module can open
+  a key with NOEFFECTS and still read its bytes.
+- `src/compressor/compressor_object.{h,c}`:
+  - `compressorGetForMainThread(algorithm_id)`: the main thread's
+    compressors for decompressing, one per algorithm, made on first use.
+  - `compressorSetCompressedValue(o, frame)`: install a frame.
+  - `compressorDecompressStringObject(o)`: decompress in place.
+  - `compressorDecompressToSds(o)`: a plain copy; `o` does not change.
+  - `compressorStringObjectLen(o)`: the plain length, from the frame header.
+  - Any decompress failure calls `serverPanic()`.
+- `src/compressor/compressor_workers.{h,c}`, three call sites in
+  `src/server.c`:
+  - `compressorWorkersInit()` in `InitServerLast()`: starts
+    `compression-threads` workers. Each has its own `compressorAlg`. Jobs go
+    through two `mutexQueue`s.
+  - `compressorCron()` in `serverCron()`: samples up to
+    `COMPRESSOR_MAX_INFLIGHT_REQUESTS` keys (db picked by key count, then
+    `kvstoreGetFairRandomHashtableIndex()` and
+    `kvstoreHashtableSampleEntries()`). Takes RAW strings with refcount 1, in
+    the size range, and cold: LFU count at most `COMPRESSOR_LFU_THRESHOLD`,
+    or idle at least `COMPRESSOR_MIN_IDLE_SECONDS`. Copies the bytes and
+    queues a job. Stops at `COMPRESSOR_MAX_INFLIGHT_REQUESTS` jobs in flight.
+  - An in-flight set (`inflight_keys`, by db id and key) keeps a key out of
+    two jobs at once.
+  - The worker builds the frame and drops it if it is not smaller.
+  - Queueing and installing pause while `hasActiveChildProcess()`, to avoid
+    copy-on-write in the child.
+  - Random numbers come from `genrand64_int64()` with rejection sampling, so
+    a key count above 2^31 is covered.
+  - `compressorWorkersKill()` in `killThreads()` (`debug.c`) stops the
+    workers before the crash-time memory test.
+  - `compressorBeforeSleep()` in `beforeSleep()`: installs a frame only if
+    `canCompress()` still passes (RAW, refcount 1, size range, cold), the key
+    still holds the same bytes (`memcmp`), and the savings check passes.
+    Otherwise the frame is dropped, and `errno` says why.
+- The robj does not change, only its value buffer and its encoding. So the
+  key, the TTL, and the LRU data stay.
+- `lookupKey()` calls `compressorLookupValue()`:
+  - not a compressed string, or `LOOKUP_NODECOMPRESS`: the value as it is.
+  - a write (`LOOKUP_WRITE`), or no child: decompress in place.
+  - a read while a child runs: `compressorCreatePlainCopy()` makes a
+    temporary plain copy with the same key, TTL, and LRU/LFU. The stored
+    value does not change, so no copy-on-write. `compressorAfterCall()` in
+    `afterCommand()` releases the copies when `server.execution_nesting` is
+    0. `compressorBeforeSleep()` releases them too, as a safety net.
+  - `PFCOUNT` writes its cache into the copy during a child. Accepted.
+  `objectCommandLookup()` (OBJECT, DEBUG OBJECT) sets it. `MEMORY USAGE` uses
+  `dbFind()`, so it does not decompress.
+- Module key handles (`moduleInitKey()`): every handle gives the module a
+  plain value.
+  - A read handle gets its own plain copy (`compressorCreatePlainCopy()`),
+    with or without a child. The stored value stays compressed, so a module
+    that scans the keyspace does not decompress all of it. The handle owns the
+    copy (`owns_value`), and `moduleCloseKey()` frees it.
+  - `VM_OpenKey()` for reading passes `LOOKUP_NODECOMPRESS`, so the copy is
+    made by `moduleInitKey()`. Scan callbacks and key events use the same rule.
+  - A write handle decompresses the stored value in place.
+- Hot path checks: `lookupKey()` and `moduleInitKey()` check
+  `val->encoding == OBJ_ENCODING_COMPRESSED` inline before any call.
+  `afterCommand()` calls `compressorAfterCall()` only when
+  `compressorHasPlainCopies()` (a counter of copies on the cleanup list, not
+  of copies owned by module handles). `serverCron()` and `beforeSleep()` call
+  the compressor only when `compression-mode` is not off, or copies exist.
+- `stringObjectLen()`, `compareStringObjectsWithFlags()`, and
+  `equalStringObjects()` handle compressed values.
+- Plain copy: `getDecodedObject()` (so `DEBUG DIGEST` works), RDB save
+  (`rdbSaveStringObject()`), AOF rewrite (`rioWriteBulkObject()`).
+- Free, dismiss, `objectComputeSize()`, `strEncoding()`, and defrag handle
+  the new encoding.
+- `compression-mode` with `forkless-infrastructure-enabled yes` is refused at
+  startup. Forkless save reads keys on another thread, and a read changes a
+  compressed value in place.
+- Tests: `tests/unit/compression-encoding.tcl` (24 tests, LFU servers and
+  one LRU server with `RESTORE IDLETIME`), `src/unit/test_compressor_object.cpp`
+  (5 tests), two new tests in `tests/unit/moduleapi/scan.tcl`, and a new
+  test module `tests/modules/compression.c` with
+  `tests/unit/moduleapi/compression.tcl` (4 tests).
+- Not yet (Phase 5): the hot-key list (Phase 4), the magic-byte skip table,
+  `INFO compression`, and the dictionary rule. Sampling does not skip
+  importing hashtables yet (design section 6.1).
+
+## Phase 3b - Other read paths
+
+What 3a did not do. Many of these already work in 3a, because they go
+through `lookupKey()` and get a plain value. 3b makes them keep the value
+compressed, and checks the code paths that do not use `lookupKey()`.
+
+- Use `LOOKUP_NODECOMPRESS` in the callers listed in "Facts" item 3:
+  `DUMP`, `MIGRATE`, `DEBUG DIGEST-VALUE` (plain copy), and `TYPE`,
+  `EXISTS`, `TTL`/`PTTL` (they do not read the bytes).
+- Slot migration export: check `src/cluster_migrateslots.c`, and how it reads
+  values.
+- Audit all direct reads of `obj->encoding` / `objectGetEncoding()` /
+  `sdsEncodedObject()` for `OBJ_STRING` that do not go through
+  `lookupKey()`. Put each one in one of the four classes of design section
+  7.1, and list them in the PR description.
+- Free path: call the backend `release()` and drop the dictionary user count
+  (stub until Phase 6).
+- Forkless save: remove the startup refusal. A read of a key that the
+  forkless thread holds must not change the value in place.
+- `DEBUG COMPRESS-KEY <key>`: compress one key now, for tests.
+- Tests: `DUMP`/`RESTORE`, `TYPE`/`EXISTS`/`TTL` keep the value compressed,
+  keyspace notifications unchanged, unit test for object free and size with
+  a frame.
 
 ## Phase 4 - Hot-key LRU
 
@@ -230,13 +293,15 @@ Goal: real background compression without dictionaries.
 - Worker pool: `compression-threads` threads. Check if `bio`, `mutexqueue`,
   or `threads_mngr` can be reused before writing a new pool. Request queue
   and completion queue. Optional CPU pinning is v2.
-- In-flight table keyed by `(dbid, key)` with `{version, refs}`.
-  - Version bump in `signalModifiedKey()` and `dbUnshareStringValue()`.
-  - Global `keyspace_epoch` bumped by `FLUSHALL`, `FLUSHDB`, `SWAPDB`,
-    full-sync load, `DEBUG RELOAD`.
-- Job: owned copy of the value bytes (never a live pointer), recorded
-  version and epoch, `dict_id`. The worker frees the input before it
-  publishes the output.
+- Freshness (decided): compare the bytes at install, no version table, no
+  epoch, no hook in `signalModifiedKey()`. The job keeps its input copy until
+  install. At install: key exists, value is RAW with refcount 1, same length,
+  same bytes (`memcmp`). Locking the key (`blockClientInUseOnKeys()`) was
+  rejected because it adds latency to client writes. See design section
+  6.3 and 6.3.1.
+- Job: owned copy of the value bytes (never a live pointer), `dbid`, key
+  name, `dict_id`. The worker drops a frame that is not smaller than the
+  input. Input and output live until install: at most 25 MiB.
 - `compressionCron()` from `serverCron`:
   - Stop if in-flight count `>= COMPRESSION_MAX_INFLIGHT`.
   - Pick a db weighted by key count, then
@@ -258,9 +323,9 @@ Goal: real background compression without dictionaries.
     - `lz4`: compress without a dictionary (`dict_id` 0) from the start.
     - Count values skipped while waiting for a dictionary in
       `INFO compression`.
-- Drain completions on the main thread (cron or `beforeSleep`): check
-  epoch, version, key still present, value still the same `robj`, then net
-  savings guard, then install. Otherwise discard and count.
+- Drain completions on the main thread (`beforeSleep`, one line:
+  `compressorBeforeSleep()`): run the byte compare above, then the net
+  savings guard, then install. Otherwise drop and count.
 - Behavior during fork child, `loading`, `CLIENT PAUSE WRITE`, and on a
   replica (recommended: sweeper runs on replicas too; it is local memory).
 - Keyspace notifications: none for install (it is not a logical change).
@@ -269,7 +334,7 @@ Goal: real background compression without dictionaries.
   reason, magic-byte skips, in-flight, cap stops, stale jobs, guard
   discards, errors, hot-key counters.
 - Tests:
-  - Unit: in-flight table, version and epoch rules, magic-byte table.
+  - Unit: the install checks (byte compare), magic-byte table.
   - Tcl `tests/unit/compression-sweeper.tcl` with a small idle time through
     `DEBUG` or a test-only config: values become compressed; a write during
     a job is not lost (`DEBUG SLEEP` / `DEBUG` hook to delay workers);
@@ -369,7 +434,7 @@ results added to the design doc.
 - AOF load: startup time and peak memory for both preamble settings.
 - Synchronous decompression on egress paths: latency, throughput, peak
   temporary memory.
-- Read promotion: p50/p99/p99.9 first-read and hot-read latency.
+- Decompress on first read: p50/p99/p99.9 latency of the first read and of later reads.
 - Hot-key LRU: working sets below and above 100,000 keys.
 - Wire format and replication decisions: plain vs compressed transfer.
 - AOF persistence: rewrite time, child memory, copy-on-write.
@@ -387,6 +452,13 @@ results added to the design doc.
 
 ## Cross-cutting rules
 
+- RUN UNIT TESTS WITH `gtest-parallel`, ONE PROCESS PER TEST:
+  `python3 deps/gtest-parallel/gtest_parallel.py .build-debug/bin/valkey-unit-gtests`
+  Add `--gtest_filter='Compressor*'` to run only our tests. Do not trust a
+  run of all tests in one process (`./bin/valkey-unit-gtests` with no
+  filter): it crashes at `CmdFlagsTest.TestWriteFirstkeyOnly`, and
+  `ObjectTest.metadata_changes_embed_threshold` fails after the other
+  `ObjectTest` tests. Both problems existed before our changes.
 - Change existing source files as little as possible. When it makes sense,
   put new logic in a new file (for example `src/compressor/compressor_*.c`) and call it
   from existing code with a small hook.
@@ -397,6 +469,11 @@ results added to the design doc.
   `src/CMakeLists.txt`); do not add `src/compressor/` to any include path.
 - After adding a file to `ENGINE_SERVER_OBJ`, run `make distclean`, because
   `src/.make-settings` caches the object list used by the unit test build.
+- No `void` function with an early exit. Return a value (`bool`, a count,
+  or a pointer), and set `errno` when it fails. A function with no early
+  exit may stay `void`.
+  "Free" functions that only return early on NULL (like `free()`) also stay
+  `void`: `freeCompressor()`, `lz4StateFree()`, `lz4DictFree()`.
 - Do not duplicate code. When the same logic is needed in more than one
   place, add a helper function and call it from each place.
 - All allocations through `zmalloc`, so the feature cost is in

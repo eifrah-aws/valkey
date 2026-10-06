@@ -28,6 +28,7 @@
  */
 
 #include "server.h"
+#include "compressor/compressor_workers.h"
 #include "ordered_index.h"
 #include "util.h"
 #include "sha1.h" /* SHA1 is used for DEBUG DIGEST */
@@ -2326,6 +2327,7 @@ static void killMainThread(void) {
 void killThreads(void) {
     killMainThread();
     bioKillThreads();
+    compressorWorkersKill();
     killIOThreads();
 }
 

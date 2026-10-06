@@ -30,6 +30,7 @@
 
 #include "hashtable.h"
 #include "server.h"
+#include "compressor/compressor_object.h"
 #include "ordered_index.h"
 #include "serverassert.h"
 #include "functions.h"
@@ -698,7 +699,7 @@ robj *createModuleObject(moduleType *mt, void *value) {
 }
 
 void freeStringObject(robj *o) {
-    if (objectGetEncoding(o) == OBJ_ENCODING_RAW) {
+    if (objectGetEncoding(o) == OBJ_ENCODING_RAW || objectGetEncoding(o) == OBJ_ENCODING_COMPRESSED) {
         sdsfree(objectGetVal(o));
     }
 }
@@ -803,7 +804,7 @@ void dismissSds(sds s) {
 
 /* See dismissObject() */
 void dismissStringObject(robj *o) {
-    if (objectGetEncoding(o) == OBJ_ENCODING_RAW) {
+    if (objectGetEncoding(o) == OBJ_ENCODING_RAW || objectGetEncoding(o) == OBJ_ENCODING_COMPRESSED) {
         dismissSds(objectGetVal(o));
     }
 }
@@ -1079,6 +1080,9 @@ robj *getDecodedObject(robj *o) {
         ll2string(buf, 32, (long)objectGetVal(o));
         dec = createStringObject(buf, strlen(buf));
         return dec;
+    } else if (objectGetType(o) == OBJ_STRING && objectGetEncoding(o) == OBJ_ENCODING_COMPRESSED) {
+        /* A plain copy. The stored value stays compressed. */
+        return createObject(OBJ_STRING, compressorDecompressToSds(o));
     } else {
         serverPanic("Unknown encoding type");
     }
@@ -1101,6 +1105,15 @@ int compareStringObjectsWithFlags(const robj *a, const robj *b, int flags) {
     size_t alen, blen, minlen;
 
     if (a == b) return 0;
+    if (a->encoding == OBJ_ENCODING_COMPRESSED || b->encoding == OBJ_ENCODING_COMPRESSED) {
+        /* Compare plain copies. getDecodedObject() gives one. */
+        robj *plain_a = getDecodedObject((robj *)a);
+        robj *plain_b = getDecodedObject((robj *)b);
+        int cmp = compareStringObjectsWithFlags(plain_a, plain_b, flags);
+        decrRefCount(plain_a);
+        decrRefCount(plain_b);
+        return cmp;
+    }
     if (sdsEncodedObject(a)) {
         astr = objectGetVal(a);
         alen = sdslen(astr);
@@ -1148,7 +1161,7 @@ int equalStringObjects(robj *a, robj *b) {
         return objectGetVal(a) == objectGetVal(b);
     } else if (a->encoding != OBJ_ENCODING_INT &&
                b->encoding != OBJ_ENCODING_INT &&
-               sdslen(objectGetVal(a)) != sdslen(objectGetVal(b))) {
+               stringObjectLen(a) != stringObjectLen(b)) {
         return 0;
     } else {
         return compareStringObjects(a, b) == 0;
@@ -1159,6 +1172,8 @@ size_t stringObjectLen(robj *o) {
     serverAssertWithInfo(NULL, o, objectGetType(o) == OBJ_STRING);
     if (sdsEncodedObject(o)) {
         return sdslen(objectGetVal(o));
+    } else if (objectGetEncoding(o) == OBJ_ENCODING_COMPRESSED) {
+        return compressorStringObjectLen(o);
     } else {
         return sdigits10((long)objectGetVal(o));
     }
@@ -1321,6 +1336,7 @@ char *strEncoding(int encoding) {
     case OBJ_ENCODING_EMBSTR: return "embstr";
     case OBJ_ENCODING_STREAM: return "stream";
     case OBJ_ENCODING_PATH_HASH: return "pathhash";
+    case OBJ_ENCODING_COMPRESSED: return "compressed";
     default: return "unknown";
     }
 }
@@ -1338,7 +1354,7 @@ size_t objectComputeSize(robj *key, robj *o, size_t sample_size, int dbid) {
     size_t asize = zmalloc_size((void *)o);
 
     if (objectGetType(o) == OBJ_STRING) {
-        if (objectGetEncoding(o) == OBJ_ENCODING_RAW) {
+        if (objectGetEncoding(o) == OBJ_ENCODING_RAW || objectGetEncoding(o) == OBJ_ENCODING_COMPRESSED) {
             asize += sdsAllocSize(objectGetVal(o));
         } else if (objectGetEncoding(o) != OBJ_ENCODING_INT && objectGetEncoding(o) != OBJ_ENCODING_EMBSTR) {
             serverPanic("Unknown string encoding");
@@ -1833,7 +1849,7 @@ int objectSetLRUOrLFU(robj *val, long long lfu_freq, long long lru_idle_secs) {
 /* This is a helper function for the OBJECT command. We need to lookup keys
  * without any modification of LRU or other parameters. */
 robj *objectCommandLookup(client *c, robj *key) {
-    return lookupKeyReadWithFlags(c->db, key, LOOKUP_NOTOUCH | LOOKUP_NONOTIFY | LOOKUP_NOHOTKEYS);
+    return lookupKeyReadWithFlags(c->db, key, LOOKUP_NOTOUCH | LOOKUP_NONOTIFY | LOOKUP_NOHOTKEYS | LOOKUP_NODECOMPRESS);
 }
 
 robj *objectCommandLookupOrReply(client *c, robj *key, robj *reply) {

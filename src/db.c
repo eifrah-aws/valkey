@@ -28,6 +28,7 @@
  */
 
 #include "server.h"
+#include "compressor/compressor_object.h"
 #include "listpack.h"
 #include "hotkeys.h"
 #include "ordered_index.h"
@@ -122,6 +123,9 @@ robj *lookupKey(serverDb *db, robj *key, int flags) {
 
         if (!(flags & (LOOKUP_NOSTATS | LOOKUP_WRITE))) server.stat_keyspace_hits++;
         /* TODO: Use separate hits stats for WRITE */
+
+        /* Callers get a compressed value only when they ask for it. */
+        if (unlikely(val->encoding == OBJ_ENCODING_COMPRESSED)) val = compressorLookupValue(val, flags);
     } else {
         if (!(flags & (LOOKUP_NONOTIFY | LOOKUP_WRITE))) notifyKeyspaceEvent(NOTIFY_KEY_MISS, "keymiss", key, db->id);
         if (!(flags & (LOOKUP_NOSTATS | LOOKUP_WRITE))) server.stat_keyspace_misses++;

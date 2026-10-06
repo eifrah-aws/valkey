@@ -17,6 +17,7 @@
 #include "compressor/compressor_frame.h"
 
 /* compression-threads */
+#define COMPRESSOR_THREADS_MIN 1
 #define COMPRESSOR_THREADS_MAX 16
 #define COMPRESSOR_THREADS_DEFAULT 1
 

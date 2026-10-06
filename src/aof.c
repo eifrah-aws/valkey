@@ -32,6 +32,7 @@
 #include "listpack.h"
 #include "sds.h"
 #include "server.h"
+#include "compressor/compressor_object.h"
 #include "ordered_index.h"
 #include "bio.h"
 #include "rio.h"
@@ -1921,6 +1922,11 @@ int rioWriteBulkObject(rio *r, robj *obj) {
         return rioWriteBulkLongLong(r, (long)objectGetVal(obj));
     } else if (sdsEncodedObject(obj)) {
         return rioWriteBulkString(r, objectGetVal(obj), sdslen(objectGetVal(obj)));
+    } else if (compressorIsCompressedString(obj)) {
+        sds plain = compressorDecompressToSds(obj);
+        int written = rioWriteBulkString(r, plain, sdslen(plain));
+        sdsfree(plain);
+        return written;
     } else {
         serverPanic("Unknown string encoding");
     }

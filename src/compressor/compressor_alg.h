@@ -46,6 +46,7 @@ typedef enum {
     COMPRESSOR_ALG_NONE = 0, /* compression-mode off. No backend is loaded. */
     COMPRESSOR_ALG_LZ4 = 1,
     COMPRESSOR_ALG_ZSTD = 2,
+    COMPRESSOR_ALG_COUNT, /* number of ids, not an algorithm */
 } compressorAlgId;
 
 /* Failure codes, shared by every backend. They land in

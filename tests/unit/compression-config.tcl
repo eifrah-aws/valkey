@@ -52,10 +52,10 @@ start_server {tags {"compression external:skip"}} {
     }
 }
 
-start_server {tags {"compression external:skip"} overrides {compression-mode lz4 compression-threads 0 compression-dict-size 2048}} {
+start_server {tags {"compression external:skip"} overrides {compression-mode lz4 compression-threads 2 compression-dict-size 2048}} {
     test {Startup-only compression settings can be set at startup} {
         assert_equal {compression-mode lz4} [r config get compression-mode]
-        assert_equal {compression-threads 0} [r config get compression-threads]
+        assert_equal {compression-threads 2} [r config get compression-threads]
         assert_equal {compression-dict-size 2048} [r config get compression-dict-size]
     }
 }
@@ -64,6 +64,7 @@ tags {"compression external:skip"} {
     test {Bad compression settings stop the server at startup} {
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-mode zstd]
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-mode gzip]
+        assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-threads 0]
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-threads 17]
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-max-value-size 131073]
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-dict-size 100]

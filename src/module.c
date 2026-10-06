@@ -56,6 +56,7 @@
  * function names. For details, see the script src/modules/gendoc.rb.
  * -------------------------------------------------------------------------- */
 #include "server.h"
+#include "compressor/compressor_object.h"
 #include "ordered_index.h"
 #include "cluster.h"
 #include "entry.h"
@@ -214,6 +215,9 @@ struct ValkeyModuleKey {
     robj *value; /* Value object, or NULL if the key was not found. */
     void *iter;  /* Iterator. */
     int mode;    /* Opening mode. */
+    /* True when value is a plain copy of a compressed value, owned by this
+     * handle. moduleCloseKey() frees it. */
+    int owns_value;
 
     union {
         struct {
@@ -4331,6 +4335,20 @@ static void moduleInitKey(ValkeyModuleKey *kp, ValkeyModuleCtx *ctx, robj *keyna
     kp->db = ctx->client->db;
     kp->key = keyname;
     incrRefCount(keyname);
+    kp->owns_value = 0;
+    /* Modules can read the bytes directly (VM_StringDMA), so they always get
+     * a plain value. A write handle decompresses the stored value in place. A
+     * read handle gets its own plain copy and the stored value stays
+     * compressed: a module that scans the keyspace must not decompress all of
+     * it. */
+    if (value && unlikely(value->encoding == OBJ_ENCODING_COMPRESSED) && compressorIsCompressedString(value)) {
+        if (mode & VALKEYMODULE_WRITE) {
+            compressorDecompressStringObject(value);
+        } else {
+            value = compressorCreatePlainCopy(value);
+            kp->owns_value = 1;
+        }
+    }
     kp->value = value;
     kp->iter = NULL;
     kp->mode = mode;
@@ -4388,7 +4406,8 @@ ValkeyModuleKey *VM_OpenKey(ValkeyModuleCtx *ctx, robj *keyname, int mode) {
         value = lookupKeyWriteWithFlags(ctx->client->db, keyname, flags);
         if (value && bgIteration_isEntryInuse(value)) return NULL;
     } else {
-        value = lookupKeyReadWithFlags(ctx->client->db, keyname, flags);
+        /* moduleInitKey() gives a read handle its own plain copy. */
+        value = lookupKeyReadWithFlags(ctx->client->db, keyname, flags | LOOKUP_NODECOMPRESS);
         if (value == NULL) {
             return NULL;
         }
@@ -4433,6 +4452,11 @@ static void moduleCloseKey(ValkeyModuleKey *key) {
         }
     }
     serverAssert(key->iter == NULL);
+    if (key->owns_value) {
+        decrRefCount(key->value);
+        key->value = NULL;
+        key->owns_value = 0;
+    }
     decrRefCount(key->key);
 }
 

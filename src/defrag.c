@@ -39,6 +39,7 @@
  */
 
 #include "server.h"
+#include "compressor/compressor_object.h"
 #include "ordered_index.h"
 #include "hashtable.h"
 #include "eval.h"
@@ -216,7 +217,7 @@ sds activeDefragSds(sds sdsptr) {
  * case the caller can fix the references before freeing the original object.
  */
 static robj *activeDefragStringObWithoutFree(robj *ob, size_t *allocation_size) {
-    if (ob->type == OBJ_STRING && ob->encoding == OBJ_ENCODING_RAW) {
+    if (compressorIsCompressedString(ob) || (ob->type == OBJ_STRING && ob->encoding == OBJ_ENCODING_RAW)) {
         // Try to defrag the linked sds, regardless of if robj will be moved
         sds newsds = activeDefragSds((sds)objectGetVal(ob));
         if (newsds) objectSetVal(ob, newsds);
