@@ -7,73 +7,85 @@ Source design: `design-docs/inline-compression.md` (in this repo; the old copy i
 Issue: valkey-io/valkey #3423
 Branch: `valkey-inline-compression`
 
-Each phase below is one PR. Each PR must build with no warnings, pass
-`make -C src test-unit`, and pass the relevant Tcl tests. Each PR must keep the
+Each phase below is one PR. Each PR must build with no warnings (Make and
+CMake), pass the unit tests with `gtest-parallel` (see "Cross-cutting
+rules"), and pass the relevant Tcl tests. Each PR must keep the
 feature unreachable or safe when `compression-mode off` (the default).
 
 ---
 
 ## Status
 
+All commits below are pushed to `origin/valkey-inline-compression` (the
+`eifrah-aws/valkey` fork).
+
 | Phase | State | Commit |
 |---|---|---|
-| 0 - Compressor interface and LZ4 backend | DONE | `04bd1f1cb` |
-| 1 - Compression frame | DONE | "add the compression frame" |
-| 2 - Configuration | DONE, not committed | - |
-| 3a - Full cycle: encoding, read path, background workers | DONE, not committed | - |
-| INFO compression (part of Phase 5) | DONE, not committed | - |
+| 0 - Compressor interface and LZ4 backend | DONE, pushed | `89e80d243` |
+| 1 - Compression frame | DONE, pushed | `e37891511` |
+| 2 - Configuration | DONE, pushed | `cc4fbb5fa` |
+| 3a - Full cycle: encoding, read path, background workers | DONE, pushed | `eba2a8ffd` |
+| Design doc moved to `design-docs/` and aligned | DONE, pushed | `f28ce0cb1` |
+| Fix the Linux build (`pthread_setname_np`) | DONE, pushed | `dd894985d` |
+| INFO compression (part of Phase 5) | DONE, pushed | `14df64e73` |
+| 5 - Background sweeper | PARTLY DONE (see Phase 5) | `eba2a8ffd`, `14df64e73` |
 | 3b - Other read paths | NEXT | - |
 | 4 to 11 | TODO | - |
+| Off-loading: decompress in the I/O thread | IDEA, after Phase 11 | - |
 
-## Phase 0 - Compressor interface and LZ4 backend (DONE)
+## Phase 0 - Compressor interface and LZ4 backend (DONE, pushed)
 
-Commit `04bd1f1cb`. Files moved to `src/compressor/` in Phase 1.
+Commit `89e80d243`. Files moved to `src/compressor/` in Phase 1.
 
 - `src/compressor/compressor_alg.h`, `src/compressor/compressor_alg.c`,
   `src/compressor/compressor_alg_lz4.c`.
-- `src/unit/test_compressor_alg.cpp` (30 tests).
+- `src/unit/test_compressor_alg.cpp` (34 tests now).
 - LZ4 has no trainer, so `compressorApi.train` is NULL for LZ4.
 
 ---
 
 ## Facts found in the code that change the design
 
-These must be fixed in the design doc, or decided before the matching phase.
+Items 1 and 2 are now fixed in `design-docs/inline-compression.md`. The others
+are decided, or are open until the matching phase.
 
 1. **Encoding number.** The design says `OBJ_ENCODING_COMPRESSED` is 12. In
    `src/server.h`, 12 is `OBJ_ENCODING_LISTPACK2` and 13 is
    `OBJ_ENCODING_PATH_HASH`. The `encoding` field is 4 bits
    (`src/server.h:888`), so only 14 and 15 are free (3, 4, 5 are marked
-   "No longer used" and could be reused). Use **14**.
+   "No longer used" and could be reused). We use **14** (done in 3a).
    Decision: one generic `OBJ_ENCODING_COMPRESSED` for every type and every
    algorithm. `robj->type` gives the object kind. The frame header gives the
    algorithm (`algorithm_id`) and the encoding to rebuild (`original_encoding`).
    No per-type or per-algorithm encodings.
 2. **Net-savings guard.** Appendix A shows that the guard must compare
-   allocation sizes (`zmalloc_size` / `sdsAllocSize`), not byte lengths. Section
-   6.4 does not say that yet. The plan uses allocation sizes.
+   allocation sizes (`zmalloc_size` / `sdsAllocSize`), not byte lengths. Done
+   in the code (`compressorFrameSavesMemory()`) and in design section 6.4.
 3. **Where a read decompresses (decided: in `lookupKey()`).** When
    `lookupKey()` in `src/db.c` finds a compressed string, it decompresses it,
-   stores the plain value in the keyspace, and returns it. Commands do not
+   stores the plain value in the keyspace, and returns it. During a child
+   process, a read gets a temporary plain copy instead (see 3a). Commands do not
    change, so no command can get a frame by mistake. Modules are covered too
    (`RM_StringDMA()`).
    - New flag `LOOKUP_NODECOMPRESS`: return the value as it is, compressed or
      not. Callers that use it must handle a compressed value.
    - `LOOKUP_NOTOUCH` does not imply `LOOKUP_NODECOMPRESS`. A module can open
      a key with NOTOUCH and still read its bytes.
-   - Use `LOOKUP_NODECOMPRESS` in: `DUMP`, `MIGRATE` (`src/cluster.c`),
-     `DEBUG DIGEST` / `DEBUG DIGEST-VALUE` (temporary decompress), and
-     `TYPE`, `EXISTS`, `TTL`/`PTTL`, `OBJECT`, `MEMORY USAGE` (they do not read
-     the bytes). Check each one in Phase 3.
+   - Done in 3a: `OBJECT` and `DEBUG OBJECT` use `LOOKUP_NODECOMPRESS`
+     (`objectCommandLookup()`). `MEMORY USAGE` and `DEBUG DIGEST` do not use
+     `lookupKey()`, so they do not change the value.
+   - Left for 3b: `DUMP`, `MIGRATE` (`src/cluster.c`), `DEBUG DIGEST-VALUE`
+     (they need a plain copy), and `TYPE`, `EXISTS`, `TTL`/`PTTL` (they do
+     not read the bytes).
    - Cost: commands like `TOUCH` and `RENAME` also decompress. This is safe.
      The sweeper compresses the key again later.
    - RDB save, AOF rewrite, slot migration export, and the sweeper do not use
      `lookupKey()`. They read the keyspace directly and must handle
      compressed values themselves.
 4. **Name clash.** `src/compression.{c,h}` is the RDB / replication stream
-   compression. Keep the `compressor_*` prefix for all new files. Check that
-   `INFO compression` and the `COMPRESSION` command do not clash with
-   `repl-compression` output.
+   compression. Keep the `compressor_*` prefix for all new files. `INFO
+   compression` does not clash with any other INFO section (checked). Check
+   the `COMPRESSION` command name in Phase 7.
 5. **RDB version.** Current `RDB_VERSION` is 81. Phase 8 bumps it.
 6. **zstd is not vendored, but it is already an optional system library.**
    `src/Makefile` has `BUILD_ZSTD` (default `no`, static libzstd >= 1.4.7),
@@ -92,12 +104,12 @@ These must be fixed in the design doc, or decided before the matching phase.
 
 ---
 
-## Phase 1 - Compression frame (DONE)
+## Phase 1 - Compression frame (DONE, pushed)
 
-Commit "Inline compression: add the compression frame". No keyspace change.
+Commit `e37891511`. No keyspace change.
 
 - `src/compressor/compressor_frame.{h,c}`.
-  - 10-byte header (the design says 12): `uint32_t uncompressed_len`,
+  - 10-byte header (the first design said 12): `uint32_t uncompressed_len`,
     `uint32_t dict_id` (counts up, never reused), `uint8_t algorithm_id`, then
     one byte with `format_version` (high 4 bits) and `original_encoding`
     (low 4 bits). Multi-byte fields are little endian. `original_encoding` is
@@ -128,7 +140,9 @@ Commit "Inline compression: add the compression frame". No keyspace change.
   `src/` as the include root of `valkey-server`.
 - `src/unit/test_compressor_frame.cpp` (19 tests).
 
-## Phase 2 - Configuration (DONE, not committed)
+## Phase 2 - Configuration (DONE, pushed)
+
+Commit `cc4fbb5fa`.
 
 Configs exist and are checked. Nothing compresses yet.
 
@@ -136,9 +150,10 @@ Configs exist and are checked. Nothing compresses yet.
   - The limits and defaults of the settings.
   - The fixed v1 values of the "advanced (v2)" settings
     (`COMPRESSOR_MAX_INFLIGHT_REQUESTS`, `COMPRESSOR_MIN_SAVINGS_PCT`, ...).
-  - `compressorConfigCheck()`: min value size must not be greater than max.
-    It runs at startup (in `loadServerConfigFromString()`) and as the apply
-    function of CONFIG SET.
+  - `compressorConfigCheck()`: min value size must not be greater than max,
+    and (since 3a) `compression-mode` can not be used with
+    `forkless-infrastructure-enabled yes`. It runs at startup (in
+    `loadServerConfigFromString()`) and as the apply function of CONFIG SET.
 - `src/config.c`, five settings:
 
   | Name | Range | Default | Change at runtime |
@@ -160,7 +175,9 @@ Configs exist and are checked. Nothing compresses yet.
 - `tests/unit/compression-config.tcl` (7 tests).
 - Docs in `valkey.conf` come in Phase 11.
 
-## Phase 3a - Full cycle: encoding, read path, background workers (DONE, not committed)
+## Phase 3a - Full cycle: encoding, read path, background workers (DONE, pushed)
+
+Commit `eba2a8ffd`. Linux build fix in `dd894985d`.
 
 Goal: values are compressed in the background and decompressed on read, so
 we can run benchmarks. This also does most of Phase 5.
@@ -212,8 +229,8 @@ we can run benchmarks. This also does most of Phase 5.
     `afterCommand()` releases the copies when `server.execution_nesting` is
     0. `compressorBeforeSleep()` releases them too, as a safety net.
   - `PFCOUNT` writes its cache into the copy during a child. Accepted.
-  `objectCommandLookup()` (OBJECT, DEBUG OBJECT) sets it. `MEMORY USAGE` uses
-  `dbFind()`, so it does not decompress.
+- `objectCommandLookup()` (OBJECT, DEBUG OBJECT) sets `LOOKUP_NODECOMPRESS`.
+  `MEMORY USAGE` uses `dbFind()`, so it does not decompress.
 - Module key handles (`moduleInitKey()`): every handle gives the module a
   plain value.
   - A read handle gets its own plain copy (`compressorCreatePlainCopy()`),
@@ -240,17 +257,24 @@ we can run benchmarks. This also does most of Phase 5.
   compressed value in place.
 - Tests: `tests/unit/compression-encoding.tcl` (24 tests, LFU servers and
   one LRU server with `RESTORE IDLETIME`), `src/unit/test_compressor_object.cpp`
-  (5 tests), two new tests in `tests/unit/moduleapi/scan.tcl`, and a new
+  (4 tests), two new tests in `tests/unit/moduleapi/scan.tcl`, and a new
   test module `tests/modules/compression.c` with
   `tests/unit/moduleapi/compression.tcl` (4 tests).
-- Not yet (Phase 5): the hot-key list (Phase 4), the magic-byte skip table,
-  `INFO compression`, and the dictionary rule. Sampling does not skip
-  importing hashtables yet (design section 6.1).
+- Not yet: the hot-key list (Phase 4), the magic-byte skip table and the
+  dictionary rule (Phase 5). Sampling does not skip importing hashtables yet
+  (design section 6.1). `INFO compression` came later, in `14df64e73`.
 
-## INFO compression (DONE, not committed; part of Phase 5)
+## INFO compression (DONE, pushed; part of Phase 5)
 
-- `src/compressor/compressor_stats.{h,c}`: the 26 fields of design doc
+Commit `14df64e73`.
+
+- `src/compressor/compressor_stats.{h,c}`: the 27 fields of design doc
   section 9.1. `compression` is a non-default INFO section.
+- `canCompress()` sets `EALREADY` for a compressed value, so
+  `keys_skipped_already_compressed` counts it on its own (review finding).
+- `freeStringObject()` updates the gauges only when the object still holds
+  its frame. `objectSetKeyAndExpire()` moves the frame to a new object
+  (review finding).
 - Gauges (`compressed_values*`) are relaxed atomics, because `FLUSHALL
   ASYNC` frees values on a background thread. `freeStringObject()` calls
   `compressorStringObjectFreed()`.
@@ -303,58 +327,37 @@ Goal: bounded set of recently read keys.
 
 ## Phase 5 - Background sweeper, worker pool, in-flight table
 
-Goal: real background compression without dictionaries.
+Status: PARTLY DONE.
 
-- Worker pool: `compression-threads` threads. Check if `bio`, `mutexqueue`,
-  or `threads_mngr` can be reused before writing a new pool. Request queue
-  and completion queue. Optional CPU pinning is v2.
-- Freshness (decided): compare the bytes at install, no version table, no
-  epoch, no hook in `signalModifiedKey()`. The job keeps its input copy until
-  install. At install: key exists, value is RAW with refcount 1, same length,
-  same bytes (`memcmp`). Locking the key (`blockClientInUseOnKeys()`) was
-  rejected because it adds latency to client writes. See design section
-  6.3 and 6.3.1.
-- Job: owned copy of the value bytes (never a live pointer), `dbid`, key
-  name, `dict_id`. The worker drops a frame that is not smaller than the
-  input. Input and output live until install: at most 25 MiB.
-- `compressionCron()` from `serverCron`:
-  - Stop if in-flight count `>= COMPRESSION_MAX_INFLIGHT`.
-  - Pick a db weighted by key count, then
-    `kvstoreGetFairRandomHashtableIndex()`, then
-    `kvstoreHashtableSampleEntries()`. Repeat until the budget is used.
-  - No normal lookup, no LRU/LFU touch, no hot-key insert.
-  - Coldness gate: LFU mode uses decay and `<= LFU_THRESHOLD`; other modes
-    use idle `>= MIN_IDLE_SECONDS`.
-  - Eligibility: backend active, `OBJ_STRING`, `OBJ_ENCODING_RAW`,
-    `refcount == 1`, size window, not in the hot-key LRU, not already in
-    flight, not expired.
-  - Magic-byte skip table (design section 6.1), `memcmp` only.
-  - Dictionary rule (decided):
-    - `zstd`: do not compress until the first dictionary exists. The first
-      training starts at `COMPRESSOR_DICT_MIN_TRAINING_KEYS` keys. Reason:
-      without a dictionary small values save little, these frames are never
-      compressed again with the new dictionary, and training needs plain
-      sample values.
-    - `lz4`: compress without a dictionary (`dict_id` 0) from the start.
-    - Count values skipped while waiting for a dictionary in
-      `INFO compression`.
-- Drain completions on the main thread (`beforeSleep`, one line:
-  `compressorBeforeSleep()`): run the byte compare above, then the net
-  savings guard, then install. Otherwise drop and count.
-- Behavior during fork child, `loading`, `CLIENT PAUSE WRITE`, and on a
-  replica (recommended: sweeper runs on replicas too; it is local memory).
+- Done in 3a (`eba2a8ffd`): the worker pool (two `mutexQueue`s), the sampler
+  in `compressorCron()`, the coldness test, the in-flight set, the byte
+  compare at install, the pause during a child, and the 64-bit random number.
+  Locking the key was rejected, because it adds latency to client writes
+  (design section 6.3.1).
+- Done in `14df64e73`: `INFO compression`.
+
+Left:
+
+- Magic-byte skip table (design section 6.1). A `memcmp` on the first bytes
+  only. Count the skips in `INFO compression`.
+- Dictionary rule (decided):
+  - `zstd`: do not compress until the first dictionary exists. The first
+    training starts at `COMPRESSOR_DICT_MIN_TRAINING_KEYS` keys. Reason:
+    without a dictionary small values save little, these frames are never
+    compressed again with the new dictionary, and training needs plain
+    sample values.
+  - `lz4`: compress without a dictionary (`dict_id` 0) from the start (as
+    today).
+  - Count values skipped while waiting for a dictionary in
+    `INFO compression`.
+- Skip importing hashtables when sampling (slot import).
+- Check the behavior during `CLIENT PAUSE WRITE`, and on a replica
+  (recommended: the sweeper runs on replicas too; it is local memory).
 - Keyspace notifications: none for install (it is not a logical change).
-- `INFO compression` section: mode, threads, values compressed, bytes saved
-  (allocation based), live and lifetime ratio, sampled entries, rejections by
-  reason, magic-byte skips, in-flight, cap stops, stale jobs, guard
-  discards, errors, hot-key counters.
-- Tests:
-  - Unit: the install checks (byte compare), magic-byte table.
-  - Tcl `tests/unit/compression-sweeper.tcl` with a small idle time through
-    `DEBUG` or a test-only config: values become compressed; a write during
-    a job is not lost (`DEBUG SLEEP` / `DEBUG` hook to delay workers);
-    `FLUSHALL` during a job; hot keys skipped; incompressible and image data
-    skipped; `refcount > 1` skipped; memory goes down.
+  Add a test.
+- Tests still missing: a write while its job runs (the frame is dropped);
+  `FLUSHALL` while a job runs; values in an already-compressed format are
+  skipped (after the skip table).
 
 ## Phase 6 - Dictionary registry
 
@@ -376,8 +379,9 @@ Goal: shared, frozen dictionaries with user counts. Still only LZ4.
 
 Goal: default algorithm and trained dictionaries.
 
-- Vendor `deps/zstd` (Makefile and CMake). Get approval for the new
-  dependency early, because it may take time.
+- Use zstd through `BUILD_ZSTD` (see "Facts" item 6), not a new folder in
+  `deps/`. Open question: the default mode `zstd` then needs
+  `BUILD_ZSTD=yes`.
 - `src/compressor/compressor_alg_zstd.c` with `train` (ZDICT), `dict_load`
   (`ZSTD_createCDict` / `ZSTD_createDDict`), compress, decompress.
 - Open: does LZ4 also get dictionaries from the zstd ZDICT trainer? If yes,
@@ -409,9 +413,14 @@ Goal: save and load values as-is.
   - A new value type for a compressed string frame.
 - Save: write the frame bytes as-is. AOF rewrite with preamble follows the
   same code. Command-form AOF stays plain (Phase 3).
-- Load: rebuild the registry before any value, validate every frame
-  (`frameValidate` + dictionary present), rebuild user counts. Any error
-  fails the load.
+- Load: rebuild the registry before any value, check every frame
+  (`compressorFrameParse()` and dictionary present), rebuild user counts.
+  Any error fails the load.
+- Loaded frames must be added to the `INFO compression` gauges
+  (`compressorStatsAddValue()`), because they do not go through
+  `compressorSetCompressedValue()`.
+- Loaded values must keep their LRU/LFU data, so they are not cold at once
+  only because they were loaded (check).
 - `DEBUG RELOAD`, `replicaof` full sync (disk and diskless), `rdb-key-save`
   paths, module `RM_LoadDataTypeFromString` are not affected - check.
 - Downgrade: an old server must refuse the new RDB version cleanly. Decide
@@ -458,13 +467,153 @@ results added to the design doc.
 ## Phase 11 - Documentation
 
 - `valkey.conf` entries for the five settings, with the LZ4 vs zstd note.
-- `INFO compression` field list.
+- `INFO compression` field list: already in design doc section 9.1. Add it
+  to the user docs.
 - `COMPRESSION` command docs.
 - Design doc: moved to `design-docs/inline-compression.md` and aligned with
-  the code up to Phase 3a (encoding 14, 10-byte header, allocation-size
-  savings check, byte compare, decompress in `lookupKey()`, plain copies
-  during a child and for module read handles). Keep it in step with each
-  later phase.
+  the code up to `INFO compression` (encoding 14, 10-byte header,
+  allocation-size savings check, byte compare, decompress in `lookupKey()`,
+  plain copies during a child and for module read handles, section 9.1).
+  Keep it in step with each later phase.
+
+## Off-loading: decompress in the I/O thread (IDEA, after Phase 11)
+
+### The problem
+
+We ran a test. 750,000 keys were compressed. Then a client read every key
+with `GET`.
+
+- Before the test: a `GET` takes 0.5 ms at p99.
+- During the test: a `GET` takes 2.4 ms at p99. The server does 13% fewer
+  requests per second.
+- After the test: all keys are plain again. `GET` is fast again.
+
+Why? The main thread does all the work for a command. When the value is
+compressed, the main thread must also unpack it. We measured it with
+`INFO compression`: `decompression_time_us / values_decompressed` is about
+1.5 microseconds per key. At 1.2 million requests per second, the main thread
+has only 0.8 microseconds for one command. So 1.5 extra microseconds is a
+lot. The commands wait in a line, and the wait time goes up.
+
+Each key pays this cost only one time. After the first read, the value is
+plain. But when many keys are compressed, the first reads are slow for a
+while.
+
+### The idea
+
+Let the I/O thread unpack the value, not the main thread.
+
+The I/O threads are the threads that send the answer to the client. There
+are many of them. They have free time. The main thread has no free time.
+
+Today, when a `GET` returns a big value, the main thread does not copy the
+value. It writes a small note in the answer buffer. The note says: "send the
+bytes of this object". The I/O thread reads the note and sends the bytes.
+This note is called `bulkStrRef` in `src/networking.c`.
+
+Every note in the answer buffer has a small header with a type. Today there
+are two types:
+
+- `PLAIN_REPLY`: normal bytes. Send them as they are.
+- `BULK_STR_REF`: a note. Send the bytes of the object in the note.
+
+We add a third type:
+
+- `COMPRESSED_STR_REF`: a note. The object holds a compressed value. Unpack
+  it first, then send the plain bytes.
+
+### How it works, step by step
+
+1. A client sends `GET key`. The value is compressed.
+2. The main thread does not unpack the value. It writes a `COMPRESSED_STR_REF`
+   note with a pointer to the object. It also adds 1 to the object's
+   reference count, so the object stays alive until the answer is sent.
+   This is what `BULK_STR_REF` does today too.
+3. The I/O thread reads the note. It sees the type `COMPRESSED_STR_REF`.
+4. The I/O thread reads the first 10 bytes of the compressed value (the frame
+   header). The header holds the plain size. So the I/O thread can write
+   `$<size>\r\n` with no unpacking.
+5. The I/O thread unpacks the value into its own buffer. Each I/O thread has
+   its own buffer and its own LZ4 unpacker. They do not share anything.
+6. The I/O thread sends the plain bytes and `\r\n`.
+7. When the answer is sent, the main thread takes 1 from the reference count,
+   as today.
+
+The main thread does almost no work for the value. The value in the database
+stays compressed. The memory saving stays.
+
+### How the I/O thread knows the value is compressed
+
+Only from the type in the note. The main thread checks the object encoding
+and picks the type. The I/O thread does not look at the object encoding. It
+never touches the database. This is the same rule as today: I/O threads
+only read what the main thread puts in the answer buffer.
+
+### Why it is safe to read the compressed value from the I/O thread
+
+A compressed value can change in two ways: a write unpacks it in the
+database, or the key is deleted. Both happen on the main thread. Both must
+wait until no one else holds the object. The answer holds the object (the
+reference count is above 1). So the compressed bytes do not change until the
+answer is sent.
+
+One thing must change for this. Today a write (`LOOKUP_WRITE`) unpacks the
+value in place, even when the reference count is above 1. With this plan,
+that is not safe: the I/O thread may still read the old bytes. The rule
+becomes: if the reference count is above 1, make a new plain object and put
+it in the database. Do not change the shared one. `dbUnshareStringValue()`
+already does this kind of copy for other cases.
+
+### Hot keys: unpack in the background after the first read
+
+If a key is read many times, we do not want to unpack it on every read. We
+want it plain in the database, like today.
+
+So after the first read, the main thread also gives a small job to a worker
+thread: "unpack this key". The worker gets a copy of the compressed bytes
+(small, about 500 bytes for a 2 KB JSON value). It unpacks them. Then
+`compressorBeforeSleep()` puts the plain value in the database, but only if
+the key still holds the same compressed bytes. This is the same check that
+`installJob()` does today, in the other direction.
+
+The second read finds a plain value. No unpacking anywhere.
+
+We need a rule for when to give this job. Not every read. For example: on
+the second read, or when the LFU counter goes above
+`COMPRESSOR_LFU_THRESHOLD`. The sweeper already uses the same test the other
+way.
+
+### Limits
+
+- Without I/O threads, the unpacking happens in `writeToClient()`, on the
+  main thread. No gain, no loss.
+- The I/O thread needs a buffer for the plain bytes. The bytes must live
+  until `writev()` is done. One buffer per I/O thread, reused for each write
+  call, is enough. If a write is cut in two (short write), the I/O thread
+  unpacks again on the next write. This is simple and cheap.
+- Only `GET` and commands that return the whole value as one bulk string.
+  Commands that read the bytes (`GETRANGE`, `STRLEN` is fine, `APPEND`,
+  `INCR`, ...) still unpack on the main thread, as today.
+
+### Work list
+
+- `src/networking.c`: new type `COMPRESSED_STR_REF`. New function like
+  `_addBulkStrRefToBufferOrList()` for compressed objects. In
+  `addEncodedBufferToReplyIOV()`, handle the new type: read the plain size
+  from the frame header, unpack into the thread's buffer, add to `iov`.
+- `src/io_threads.c`: one unpacker and one buffer per I/O thread.
+- `src/compressor/compressor_object.c`: a write on a shared compressed object
+  makes a new plain object instead of changing the shared one.
+- `src/compressor/compressor_workers.c`: a second job type, "unpack this
+  key", and the install step in `compressorBeforeSleep()`.
+- `src/db.c` / `compressorLookupValue()`: the rule for when to queue the
+  unpack job.
+- `INFO compression`: count answers sent from a compressed value, and unpack
+  jobs queued, installed, and dropped.
+- Tests: Tcl test with I/O threads on and off. `GET` on a compressed key
+  returns the right bytes. The key stays compressed after one read. The key
+  is plain after the second read. A write during a pending unpack job is not
+  lost. Unit test for the new reply type in `src/unit/test_networking.cpp`.
 
 ---
 
