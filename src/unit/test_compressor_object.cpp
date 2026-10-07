@@ -13,6 +13,7 @@
 extern "C" {
 #include "compressor/compressor_frame.h"
 #include "compressor/compressor_object.h"
+#include "monotonic.h"
 #include "server.h"
 }
 
@@ -33,6 +34,8 @@ class CompressorObjectTest : public ::testing::Test {
     size_t value_len;
 
     void SetUp() override {
+        /* Decompression measures its time for INFO compression. */
+        monotonicInit();
         value_len = makeValue(value, 0);
     }
 

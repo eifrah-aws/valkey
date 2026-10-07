@@ -21,6 +21,7 @@ feature unreachable or safe when `compression-mode off` (the default).
 | 1 - Compression frame | DONE | "add the compression frame" |
 | 2 - Configuration | DONE, not committed | - |
 | 3a - Full cycle: encoding, read path, background workers | DONE, not committed | - |
+| INFO compression (part of Phase 5) | DONE, not committed | - |
 | 3b - Other read paths | NEXT | - |
 | 4 to 11 | TODO | - |
 
@@ -245,6 +246,20 @@ we can run benchmarks. This also does most of Phase 5.
 - Not yet (Phase 5): the hot-key list (Phase 4), the magic-byte skip table,
   `INFO compression`, and the dictionary rule. Sampling does not skip
   importing hashtables yet (design section 6.1).
+
+## INFO compression (DONE, not committed; part of Phase 5)
+
+- `src/compressor/compressor_stats.{h,c}`: the 26 fields of design doc
+  section 9.1. `compression` is a non-default INFO section.
+- Gauges (`compressed_values*`) are relaxed atomics, because `FLUSHALL
+  ASYNC` frees values on a background thread. `freeStringObject()` calls
+  `compressorStringObjectFreed()`.
+- `CONFIG RESETSTAT` resets the counters, not the gauges. Gauges and counters
+  are two structs, so the reset never writes the gauges (review finding).
+- Phase 8 (RDB load of frames) must add loaded frames to the gauges.
+- Tests: `tests/unit/compression-info.tcl` (11 tests), including checks that
+  the counters add up.
+  `src/unit/test_compressor_stats.cpp` (4 tests).
 
 ## Phase 3b - Other read paths
 

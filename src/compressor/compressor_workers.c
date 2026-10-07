@@ -11,9 +11,11 @@
 #include "compressor/compressor_config.h"
 #include "compressor/compressor_frame.h"
 #include "compressor/compressor_object.h"
+#include "compressor/compressor_stats.h"
 #include "lrulfu.h"
 #include "mutexqueue.h"
 #include "mt19937-64.h"
+#include "monotonic.h"
 
 #include <errno.h>
 #include <limits.h>
@@ -25,9 +27,10 @@
 typedef struct compressorJob {
     int dbid;
     sds key;
-    sds inflight_name; /* The job's name in inflight_keys. Owned by that table. */
-    sds input;         /* Own copy of the plain value. Kept until install, for the compare. */
-    sds frame;         /* Set by the worker. NULL when the value does not get smaller. */
+    sds inflight_name;     /* The job's name in inflight_keys. Owned by that table. */
+    sds input;             /* Own copy of the plain value. Kept until install, for the compare. */
+    sds frame;             /* Set by the worker. NULL when the value does not get smaller. */
+    long long compress_us; /* Set by the worker: time spent compressing. */
 } compressorJob;
 
 static mutexQueue *pending_jobs; /* Main thread to workers. NULL when compression is off. */
@@ -48,6 +51,10 @@ static sds inflightName(int dbid, const_sds key) {
 
 static unsigned long inflightCount(void) {
     return inflight_keys ? hashtableSize(inflight_keys) : 0;
+}
+
+unsigned long compressorQueueLength(void) {
+    return inflightCount();
 }
 
 static void freeJob(compressorJob *job) {
@@ -80,7 +87,9 @@ static void *compressorWorkerMain(void *arg) {
 
     while (1) {
         compressorJob *job = mutexQueuePop(pending_jobs, true);
+        monotime start = getMonotonicUs();
         job->frame = compressorFrameBuild(c, OBJ_ENCODING_RAW, job->input, sdslen(job->input), NULL);
+        job->compress_us = (long long)(getMonotonicUs() - start);
         /* A frame that is not smaller can't save memory. Drop it here, so a
          * done job never holds two buffers that are both big. */
         if (job->frame != NULL && sdslen(job->frame) >= sdslen(job->input)) {
@@ -147,11 +156,16 @@ static bool isCold(robj *o) {
  * when its frame is installed, because the value or the settings can change
  * in between. Returns false and sets errno when it can't:
  *
+ *   EALREADY  already compressed
  *   EINVAL  not a plain (RAW) string
  *   EBUSY   someone else holds the object, and may read the plain bytes
  *   ERANGE  the size is outside the configured range
  *   EAGAIN  the value is not cold */
 static bool canCompress(robj *o) {
+    if (compressorIsCompressedString(o)) {
+        errno = EALREADY;
+        return false;
+    }
     if (objectGetType(o) != OBJ_STRING || objectGetEncoding(o) != OBJ_ENCODING_RAW) {
         errno = EINVAL;
         return false;
@@ -172,6 +186,18 @@ static bool canCompress(robj *o) {
     return true;
 }
 
+/* Counts a key that canCompress() refused, by the errno it set. */
+static void countSkippedKey(int err) {
+    switch (err) {
+    case EALREADY: compressor_stats.counters.keys_skipped_already_compressed++; break;
+    case EINVAL: compressor_stats.counters.keys_skipped_not_string++; break;
+    case EBUSY: compressor_stats.counters.keys_skipped_in_use++; break;
+    case ERANGE: compressor_stats.counters.keys_skipped_size++; break;
+    case EAGAIN: compressor_stats.counters.keys_skipped_hot++; break;
+    default: break;
+    }
+}
+
 /* Queues a job for the value o of a key in db dbid. Returns false and sets
  * errno to EEXIST when the key is already in a job. */
 static bool queueJob(int dbid, robj *o) {
@@ -188,6 +214,7 @@ static bool queueJob(int dbid, robj *o) {
     job->inflight_name = name;
     job->input = sdsdup(objectGetVal(o));
     job->frame = NULL;
+    job->compress_us = 0;
     mutexQueueAdd(pending_jobs, job);
     return true;
 }
@@ -222,7 +249,10 @@ int compressorCron(void) {
     if (pending_jobs == NULL || server.loading) return 0;
     /* Installing a frame changes memory that a child process (BGSAVE,
      * BGREWRITEAOF) still shares, and makes the kernel copy those pages. */
-    if (hasActiveChildProcess()) return 0;
+    if (hasActiveChildProcess()) {
+        compressor_stats.counters.compression_paused_during_save++;
+        return 0;
+    }
 
     unsigned long long total = 0;
     for (int i = 0; i < server.dbnum; i++) {
@@ -245,7 +275,18 @@ int compressorCron(void) {
         sampled += n;
         for (unsigned int i = 0; i < n && inflightCount() < COMPRESSOR_MAX_INFLIGHT_REQUESTS; i++) {
             robj *o = samples[i];
-            if (canCompress(o) && queueJob(db->id, o)) queued++;
+            compressor_stats.counters.keys_checked++;
+            if (!canCompress(o)) {
+                countSkippedKey(errno);
+                continue;
+            }
+            compressor_stats.counters.keys_eligible++;
+            if (!queueJob(db->id, o)) {
+                compressor_stats.counters.keys_skipped_already_queued++;
+                continue;
+            }
+            compressor_stats.counters.values_queued++;
+            queued++;
         }
     }
     return queued;
@@ -261,34 +302,42 @@ int compressorCron(void) {
  *           the configured range
  *   ENOENT  the key is gone
  *   ESTALE  the value changed while the job ran
- *   EINVAL, EBUSY, EAGAIN  see canCompress() */
+ *   EALREADY, EINVAL, EBUSY, EAGAIN  see canCompress() */
 static bool installJob(compressorJob *job) {
     if (job->frame == NULL) {
+        compressor_stats.counters.values_compressed_and_dropped_low_saving++;
         errno = ERANGE;
         return false;
     }
     serverDb *db = server.db[job->dbid];
     robj *o = db ? dbFind(db, job->key) : NULL;
     if (o == NULL) {
+        compressor_stats.counters.values_compressed_and_dropped_changed++;
         errno = ENOENT;
         return false;
     }
-    if (!canCompress(o)) return false;
+    if (!canCompress(o)) {
+        compressor_stats.counters.values_compressed_and_dropped_now_skipped++;
+        return false;
+    }
 
     sds current = objectGetVal(o);
     size_t len = sdslen(current);
     if (len != sdslen(job->input) || memcmp(current, job->input, len) != 0) {
+        compressor_stats.counters.values_compressed_and_dropped_changed++;
         errno = ESTALE;
         return false;
     }
 
     if (!compressorFrameSavesMemory(compressorFrameAllocSize(current), compressorFrameAllocSize(job->frame),
                                     COMPRESSOR_MIN_SAVINGS_PCT)) {
+        compressor_stats.counters.values_compressed_and_dropped_low_saving++;
         errno = ERANGE;
         return false;
     }
     compressorSetCompressedValue(o, job->frame);
     job->frame = NULL;
+    compressor_stats.counters.values_compressed++;
     return true;
 }
 
@@ -306,6 +355,7 @@ int compressorBeforeSleep(void) {
     int installed = 0;
     compressorJob *job;
     while (fifoPop(done, (void **)&job)) {
+        compressor_stats.counters.compression_time_us += job->compress_us;
         if (installJob(job)) installed++;
         freeJob(job);
     }

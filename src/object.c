@@ -699,6 +699,9 @@ robj *createModuleObject(moduleType *mt, void *value) {
 }
 
 void freeStringObject(robj *o) {
+    /* objectSetKeyAndExpire() moves the frame to a new object and leaves this
+     * one with no value. Only a frame that is freed here counts. */
+    if (objectGetEncoding(o) == OBJ_ENCODING_COMPRESSED && objectGetVal(o) != NULL) compressorStringObjectFreed(o);
     if (objectGetEncoding(o) == OBJ_ENCODING_RAW || objectGetEncoding(o) == OBJ_ENCODING_COMPRESSED) {
         sdsfree(objectGetVal(o));
     }

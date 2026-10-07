@@ -33,6 +33,7 @@
  */
 #include "server.h"
 #include "compressor/compressor_object.h"
+#include "compressor/compressor_stats.h"
 #include "compressor/compressor_workers.h"
 #include "hotkeys.h"
 #include "ordered_index.h"
@@ -2930,6 +2931,7 @@ int listenToPort(connListener *sfd) {
 void resetServerStats(void) {
     int j;
 
+    compressorStatsReset();
     server.stat_numcommands = 0;
     server.stat_numconnections = 0;
     server.stat_expiredkeys = 0;
@@ -7170,6 +7172,12 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
     if (all_sections || (dictFind(section_dict, "scriptingengines") != NULL)) {
         if (sections++) info = sdscat(info, "\r\n");
         info = genValkeyInfoStringScriptingEngines(info);
+    }
+
+    /* Compression */
+    if (all_sections || (dictFind(section_dict, "compression") != NULL)) {
+        if (sections++) info = sdscat(info, "\r\n");
+        info = compressorStatsInfo(info);
     }
 
     /* Key space */

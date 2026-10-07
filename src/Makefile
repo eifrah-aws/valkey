@@ -539,6 +539,7 @@ ENGINE_SERVER_OBJ = \
     compressor/compressor_config.o \
     compressor/compressor_frame.o \
     compressor/compressor_object.o \
+    compressor/compressor_stats.o \
     compressor/compressor_workers.o \
     config.o \
     connection.o \

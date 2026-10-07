@@ -11,6 +11,8 @@
 #include "compressor/compressor_frame.h"
 #include "server.h"
 #include "adlist.h"
+#include "monotonic.h"
+#include "compressor/compressor_stats.h"
 
 #include <errno.h>
 
@@ -45,9 +47,14 @@ bool compressorIsCompressedString(const robj *o) {
 void compressorSetCompressedValue(robj *o, sds frame) {
     serverAssert(objectGetType(o) == OBJ_STRING && objectGetEncoding(o) == OBJ_ENCODING_RAW);
     sds plain = objectGetVal(o);
+    compressorStatsAddValue(sdslen(plain), compressorFrameAllocSize(frame));
     objectSetVal(o, frame);
     objectSetEncoding(o, OBJ_ENCODING_COMPRESSED);
     sdsfree(plain);
+}
+
+void compressorStringObjectFreed(const robj *o) {
+    compressorStatsRemoveValue(compressorStringObjectLen(o), compressorFrameAllocSize(objectGetVal(o)));
 }
 
 /* Reads the frame header of the compressed string o. Stops the server if the
@@ -65,6 +72,7 @@ size_t compressorStringObjectLen(const robj *o) {
 }
 
 sds compressorDecompressToSds(const robj *o) {
+    monotime start = getMonotonicUs();
     const_sds frame = objectGetVal(o);
     compressorFrameHeader hdr;
     stringObjectHeader(o, &hdr);
@@ -76,6 +84,7 @@ sds compressorDecompressToSds(const robj *o) {
     if (c == NULL) serverPanic("Compressed value needs algorithm %u, which this build does not have", hdr.algorithm_id);
 
     sds plain = compressorFrameDecompress(c, frame, NULL);
+    compressor_stats.counters.decompression_time_us += getMonotonicUs() - start;
     if (plain == NULL) serverPanic("Can't decompress value: %s", compressorStrerror(c->last_error));
     return plain;
 }
@@ -83,6 +92,8 @@ sds compressorDecompressToSds(const robj *o) {
 void compressorDecompressStringObject(robj *o) {
     sds plain = compressorDecompressToSds(o);
     sds frame = objectGetVal(o);
+    compressorStatsRemoveValue(sdslen(plain), compressorFrameAllocSize(frame));
+    compressor_stats.counters.values_decompressed++;
     objectSetVal(o, plain);
     objectSetEncoding(o, OBJ_ENCODING_RAW);
     sdsfree(frame);
@@ -108,6 +119,7 @@ robj *compressorCreatePlainCopy(robj *val) {
     robj *copy = createObject(OBJ_STRING, compressorDecompressToSds(val));
     copy = objectSetKeyAndExpire(copy, objectGetKey(val), objectGetExpire(val));
     objectSetLRU(copy, objectGetLRU(val));
+    compressor_stats.counters.temporary_copies_made++;
     return copy;
 }
 

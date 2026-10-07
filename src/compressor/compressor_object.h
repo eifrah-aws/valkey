@@ -36,6 +36,10 @@ bool compressorIsCompressedString(const struct serverObject *o);
  * plain value. o must be a RAW string, and o takes over frame. */
 void compressorSetCompressedValue(struct serverObject *o, sds frame);
 
+/* Updates INFO compression before a compressed string o is freed. Can run on
+ * a background thread (FLUSHALL ASYNC). */
+void compressorStringObjectFreed(const struct serverObject *o);
+
 /* The number of temporary plain copies on the cleanup list. Changed only by
  * compressor_object.c. Read through compressorHasPlainCopies(). */
 extern unsigned long compressor_plain_copies;
