@@ -6,11 +6,11 @@
 
 /* Background compression of cold string values. See compressor_workers.h. */
 
+#include "server.h"
 #include "compressor/compressor_workers.h"
 #include "compressor/compressor_config.h"
 #include "compressor/compressor_frame.h"
 #include "compressor/compressor_object.h"
-#include "server.h"
 #include "lrulfu.h"
 #include "mutexqueue.h"
 #include "mt19937-64.h"
