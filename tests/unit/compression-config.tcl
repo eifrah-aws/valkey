@@ -17,6 +17,7 @@ start_server {tags {"compression external:skip"}} {
         assert_equal {compression-max-value-size 131072} [r config get compression-max-value-size]
         assert_equal {compression-dict-size 102400} [r config get compression-dict-size]
         assert_equal {compression-max-inflight-requests 100} [r config get compression-max-inflight-requests]
+        assert_equal {compression-lfu-threshold 4} [r config get compression-lfu-threshold]
     }
 
     test {Startup-only compression settings can not be changed} {
@@ -50,6 +51,16 @@ start_server {tags {"compression external:skip"}} {
         assert_error "*must be between 1 and 10000*" {r config set compression-max-inflight-requests 10001}
         assert_equal {compression-max-inflight-requests 10000} [r config get compression-max-inflight-requests]
         r config set compression-max-inflight-requests 100
+    }
+
+    test {compression-lfu-threshold can be changed at runtime and has limits} {
+        r config set compression-lfu-threshold 0
+        assert_equal {compression-lfu-threshold 0} [r config get compression-lfu-threshold]
+        r config set compression-lfu-threshold 255
+        assert_error "*must be between 0 and 255*" {r config set compression-lfu-threshold -1}
+        assert_error "*must be between 0 and 255*" {r config set compression-lfu-threshold 256}
+        assert_equal {compression-lfu-threshold 255} [r config get compression-lfu-threshold]
+        r config set compression-lfu-threshold 4
     }
 
     test {Compression min value size can not be greater than max} {
@@ -94,6 +105,7 @@ tags {"compression external:skip"} {
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-max-value-size 131073]
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-dict-size 100]
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-max-inflight-requests 0]
+        assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-lfu-threshold 256]
         assert_match "*compression-min-value-size can't be greater than compression-max-value-size*" \
             [compression_start_fails --compression-min-value-size 2048 --compression-max-value-size 1024]
     }

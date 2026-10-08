@@ -156,10 +156,12 @@ Configs exist and are checked. Nothing compresses yet.
 - New `src/compressor/compressor_config.{h,c}`:
   - The limits and defaults of the settings.
   - The fixed v1 values of the "advanced (v2)" settings
-    (`COMPRESSOR_MIN_SAVINGS_PCT`, `COMPRESSOR_LFU_THRESHOLD`, ...).
+    (`COMPRESSOR_MIN_SAVINGS_PCT`, `COMPRESSOR_MIN_IDLE_SECONDS`, ...).
   - Later: `compression-max-inflight-requests` (1-10000, default 100,
     can change at runtime) took the place of the fixed
     `COMPRESSOR_MAX_INFLIGHT_REQUESTS`.
+  - Later: `compression-lfu-threshold` (0-255, default 4, can change at
+    runtime) took the place of the fixed `COMPRESSOR_LFU_THRESHOLD`.
   - `compressorConfigCheck()`: min value size must not be greater than max,
     and (since 3a) `compression-mode` can not be used with
     `forkless-infrastructure-enabled yes`. It runs at startup (in
@@ -212,7 +214,7 @@ we can run benchmarks. This also does most of Phase 5.
     `COMPRESSOR_SAMPLES_PER_CRON` (100) keys (db picked by key count, then
     `kvstoreGetFairRandomHashtableIndex()` and
     `kvstoreHashtableSampleEntries()`). Takes RAW strings with refcount 1, in
-    the size range, and cold: LFU count at most `COMPRESSOR_LFU_THRESHOLD`
+    the size range, and cold: LFU count at most `compression-lfu-threshold`
     (4; a new key starts at 5, so it is hot until it decays), or idle at
     least `COMPRESSOR_MIN_IDLE_SECONDS`. Copies the bytes and queues a job.
     Stops at `compression-max-inflight-requests` jobs in flight.
@@ -650,7 +652,7 @@ threads unpack it 1000 times. For CPU this is fine. But the design wants hot
 keys plain in the database.
 
 Simple rule in `GET`: if the key is hot (LFU counter above
-`COMPRESSOR_LFU_THRESHOLD`, or idle time below
+`compression-lfu-threshold`, or idle time below
 `COMPRESSOR_MIN_IDLE_SECONDS`), unpack in place on the main thread, as
 today. If the key is cold, send the compressed part.
 

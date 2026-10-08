@@ -41,6 +41,17 @@
 #define COMPRESSOR_MAX_INFLIGHT_REQUESTS_MAX 10000
 #define COMPRESSOR_MAX_INFLIGHT_REQUESTS_DEFAULT 100
 
+/* compression-lfu-threshold: a value is cold when its LFU counter is at most
+ * this number. This test is used with LFU eviction, in place of
+ * COMPRESSOR_MIN_IDLE_SECONDS. A new key starts at 5 (LFU_INIT_VAL), so with
+ * the default of 4 it is hot until the counter decays. With the default
+ * lfu-decay-time of 1, this takes at most one minute. With 5 or more, a new
+ * key is cold at once. With 0, only keys that were not used for a long time
+ * are cold. */
+#define COMPRESSOR_LFU_THRESHOLD_MIN 0
+#define COMPRESSOR_LFU_THRESHOLD_MAX 255
+#define COMPRESSOR_LFU_THRESHOLD_DEFAULT 4
+
 /* Fixed values. Users can not change these in v1. A later version may turn
  * them into settings. */
 
@@ -64,11 +75,6 @@
  * the key that was read longest ago is removed. */
 #define COMPRESSOR_HOT_KEYS_MAX 100000
 
-/* A value is cold when its LFU counter is at most this number. This test is
- * used with LFU eviction, in place of COMPRESSOR_MIN_IDLE_SECONDS. A new key
- * starts at 5 (LFU_INIT_VAL), so it is hot until the counter decays to 4. With
- * the default lfu-decay-time of 1, this takes at most one minute. */
-#define COMPRESSOR_LFU_THRESHOLD 4
 
 /* The first dictionary is trained when the keyspace has this many keys. A
  * training also needs at least this many sample values. */

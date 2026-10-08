@@ -158,7 +158,7 @@ When capacity exists, the sampling budget per cron call is `COMPRESSOR_SAMPLES_P
 
 The sweeper reads each sampled database entry directly. Sampling must not perform a normal key lookup, refresh LRU/LFU metadata, or add the key to the hot-key LRU. Candidate discovery is not a client access.
 
-A sampled value is cold according to the access metadata selected by the maxmemory policy. In LFU mode, the sweeper applies normal LFU decay and accepts a frequency at or below `compression-lfu-threshold`, 4 by default. A new key starts at 5 (`LFU_INIT_VAL`), so it is hot after it is written. With the default `lfu-decay-time` of 1, the counter decays to 4 within one minute, like the 60-second idle test in LRU mode. With `lfu-decay-time 0`, the counter never decays, and a new key is never compressed. In LRU and `noeviction` modes, it accepts an idle time at or above `compression-min-idle-seconds`, 60 seconds by default. The object's 24-bit field stores one of these forms, so the sweeper never applies both tests.
+A sampled value is cold according to the access metadata selected by the maxmemory policy. In LFU mode, the sweeper applies normal LFU decay and accepts a frequency at or below `compression-lfu-threshold`, 4 by default. A new key starts at 5 (`LFU_INIT_VAL`), so it is hot after it is written. With the default `lfu-decay-time` of 1, the counter decays to 4 within one minute, like the 60-second idle test in LRU mode. With `lfu-decay-time 0`, the counter never decays, and a new key is never compressed, unless `compression-lfu-threshold` is 5 or more. In LRU and `noeviction` modes, it accepts an idle time at or above `compression-min-idle-seconds`, 60 seconds by default. The object's 24-bit field stores one of these forms, so the sweeper never applies both tests.
 
 After the coldness test, the sweeper takes a value only if a compression backend is active and the value is `OBJ_STRING`, `OBJ_ENCODING_RAW`, sole-owner (`refcount == 1`), within the size limits, and absent from the internal hot-key LRU (§7.3). The hot-key LRU is an independent first-line exclusion: it blocks recently read keys before object metadata is evaluated, while the policy-specific coldness gate remains a fallback if that bounded LRU evicts an entry. Compressing a hot key would waste worker CPU and make its next read pay synchronous decompression again.
 
@@ -376,7 +376,7 @@ The second backend (LZ4) is operator-selectable at startup, because `compression
 
 All names are ordinary `CONFIG GET` / `CONFIG SET` settings, except `compression-mode`, `compression-threads`, and `compression-dict-size` — those three are read once at startup, like Valkey's `*_cpulist` settings, and `CONFIG SET` against them is rejected. Background compression is off unless `compression-mode` is set at boot. Decoder support remains available for compressed frames restored from RDB even when the mode is `off`.
 
-**Six primary settings**
+**Seven primary settings**
 
 | Name | Values | Default | What it does | Change at runtime |
 |---|---|---|---|---|
@@ -386,6 +386,7 @@ All names are ordinary `CONFIG GET` / `CONFIG SET` settings, except `compression
 | `compression-max-value-size` | `1`-`131072` bytes; must be at least the minimum | `131072` (128 KiB) | Largest value. Hard cap for per-value decompression and compression-job memory. | Yes |
 | `compression-dict-size` | `1024`-`1048576` bytes | `102400` (100 KiB) | Target size of a trained compression dictionary. | **No — startup only.** |
 | `compression-max-inflight-requests` | `1`-`10000` requests | `100` | Cap on queued, running, and completed-but-not-drained compression jobs. Each job holds a copy of the plain value. If you lower it, jobs in flight finish, and new jobs wait until the count is below the new cap. | Yes |
+| `compression-lfu-threshold` | `0`-`255` | `4` | Coldness gate in LFU mode: a value is cold when its LFU counter is at most this number. A new key starts at 5, so with 4 it is hot until its counter decays. With 5 or more, a new key is cold at once. | Yes |
 
 The upper limit of the value sizes is `COMPRESSOR_FRAME_MAX_VALUE_LEN`, so 128 KiB is written in one place only. A bigger value is an error and is never changed without a message. `compression-mode` can not be used with `forkless-infrastructure-enabled yes` yet (§7.2).
 
@@ -406,7 +407,6 @@ None of these are configurable in v1. The mechanisms behind them run with the fi
 | `compression-min-savings-ratio` | percent | `10` | Net-savings guard. Below this, the frame is thrown away. | No |
 | `compression-min-idle-seconds` | seconds | `60` | Coldness gate in LRU and noeviction modes, and hot-key LRU entry lifetime in every mode. | No |
 | `compression-hot-key-lru-max-entries` | entries | `100000` | Maximum recently read keys excluded from background compression (§7.3). | No |
-| `compression-lfu-threshold` | `0`–`255` | `4` | Coldness gate in LFU mode. A new key starts at 5, so it is hot until its counter decays to 4. | No |
 | `compression-dict-min-training-keys` | int | `1000` | First training fires at this key count, and needs this many samples. | No |
 | `compression-dict-max-training-keys` | int | `10000` | Sample cap for one training scan. | No |
 | `compression-training-buffer-size` | bytes | `16777216` (16 MiB) | Sample buffer, allocated in full per scan and freed after it. | No |

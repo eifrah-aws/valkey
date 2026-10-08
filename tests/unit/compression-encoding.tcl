@@ -54,6 +54,19 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         compress_key r $k
     }
 
+    test {compression-lfu-threshold decides when a new key is cold} {
+        # A new key starts at 5. With a threshold of 5, it is cold at once.
+        r config set compression-lfu-threshold 5
+        set k [new_key]
+        r set $k [compression_value]
+        wait_compressed r $k
+        r config set compression-lfu-threshold 4
+        set k2 [new_key]
+        r set $k2 [compression_value]
+        wait_for_sweep r
+        assert_equal raw [r object encoding $k2]
+    }
+
     test {A compressed value uses less memory} {
         set k [new_key]
         r set $k [compression_value]

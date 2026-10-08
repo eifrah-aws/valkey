@@ -147,7 +147,7 @@ static bool isCold(robj *o) {
     if (lrulfu_isUsingLFU()) {
         uint8_t freq;
         lfu_getFrequency(objectGetLRU(o), &freq);
-        return freq <= COMPRESSOR_LFU_THRESHOLD;
+        return freq <= server.compression_lfu_threshold;
     }
     return lru_getIdleSecs(objectGetLRU(o)) >= COMPRESSOR_MIN_IDLE_SECONDS;
 }
