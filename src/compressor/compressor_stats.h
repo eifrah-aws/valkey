@@ -36,28 +36,28 @@ typedef struct compressorGauges {
 
 typedef struct compressorCounters {
     /* The sweeper. */
-    unsigned long long keys_checked;
-    unsigned long long keys_eligible;
-    unsigned long long keys_skipped_already_compressed;
-    unsigned long long keys_skipped_not_string;
-    unsigned long long keys_skipped_in_use;
-    unsigned long long keys_skipped_size;
-    unsigned long long keys_skipped_hot;
-    unsigned long long keys_skipped_already_queued;
-    unsigned long long values_queued;
-    unsigned long long values_compressed;
-    unsigned long long values_compressed_and_dropped_low_saving;
-    unsigned long long values_compressed_and_dropped_changed;
-    unsigned long long values_compressed_and_dropped_now_skipped;
-    unsigned long long compression_paused_during_save;
+    unsigned long long compression_total_keys_checked;
+    unsigned long long compression_total_keys_eligible;
+    unsigned long long compression_total_keys_skipped_already_compressed;
+    unsigned long long compression_total_keys_skipped_not_string;
+    unsigned long long compression_total_keys_skipped_in_use;
+    unsigned long long compression_total_keys_skipped_size;
+    unsigned long long compression_total_keys_skipped_hot;
+    unsigned long long compression_total_keys_skipped_already_queued;
+    unsigned long long compression_total_jobs_queued;
+    unsigned long long compression_total_values_compressed;
+    unsigned long long compression_total_values_dropped_low_saving;
+    unsigned long long compression_total_values_dropped_changed;
+    unsigned long long compression_total_values_dropped_not_eligible;
+    unsigned long long compression_total_sweeps_paused_by_child;
     /* The sum over all workers. With more than one worker, it can grow faster
      * than real time. */
-    unsigned long long compression_time_us;
+    unsigned long long compression_total_compression_time_us;
 
     /* Reads. */
-    unsigned long long values_decompressed;
-    unsigned long long temporary_copies_made;
-    unsigned long long decompression_time_us;
+    unsigned long long compression_total_values_decompressed;
+    unsigned long long compression_total_temporary_copies_made;
+    unsigned long long compression_total_decompression_time_us;
 } compressorCounters;
 
 typedef struct compressorStats {

@@ -53,7 +53,7 @@ static unsigned long inflightCount(void) {
     return inflight_keys ? hashtableSize(inflight_keys) : 0;
 }
 
-unsigned long compressorQueueLength(void) {
+unsigned long compressorJobsInFlight(void) {
     return inflightCount();
 }
 
@@ -189,11 +189,11 @@ static bool canCompress(robj *o) {
 /* Counts a key that canCompress() refused, by the errno it set. */
 static void countSkippedKey(int err) {
     switch (err) {
-    case EALREADY: compressor_stats.counters.keys_skipped_already_compressed++; break;
-    case EINVAL: compressor_stats.counters.keys_skipped_not_string++; break;
-    case EBUSY: compressor_stats.counters.keys_skipped_in_use++; break;
-    case ERANGE: compressor_stats.counters.keys_skipped_size++; break;
-    case EAGAIN: compressor_stats.counters.keys_skipped_hot++; break;
+    case EALREADY: compressor_stats.counters.compression_total_keys_skipped_already_compressed++; break;
+    case EINVAL: compressor_stats.counters.compression_total_keys_skipped_not_string++; break;
+    case EBUSY: compressor_stats.counters.compression_total_keys_skipped_in_use++; break;
+    case ERANGE: compressor_stats.counters.compression_total_keys_skipped_size++; break;
+    case EAGAIN: compressor_stats.counters.compression_total_keys_skipped_hot++; break;
     default: break;
     }
 }
@@ -250,7 +250,7 @@ int compressorCron(void) {
     /* Installing a frame changes memory that a child process (BGSAVE,
      * BGREWRITEAOF) still shares, and makes the kernel copy those pages. */
     if (hasActiveChildProcess()) {
-        compressor_stats.counters.compression_paused_during_save++;
+        compressor_stats.counters.compression_total_sweeps_paused_by_child++;
         return 0;
     }
 
@@ -276,17 +276,17 @@ int compressorCron(void) {
         sampled += n;
         for (unsigned int i = 0; i < n && inflightCount() < max_inflight; i++) {
             robj *o = samples[i];
-            compressor_stats.counters.keys_checked++;
+            compressor_stats.counters.compression_total_keys_checked++;
             if (!canCompress(o)) {
                 countSkippedKey(errno);
                 continue;
             }
-            compressor_stats.counters.keys_eligible++;
+            compressor_stats.counters.compression_total_keys_eligible++;
             if (!queueJob(db->id, o)) {
-                compressor_stats.counters.keys_skipped_already_queued++;
+                compressor_stats.counters.compression_total_keys_skipped_already_queued++;
                 continue;
             }
-            compressor_stats.counters.values_queued++;
+            compressor_stats.counters.compression_total_jobs_queued++;
             queued++;
         }
     }
@@ -306,39 +306,39 @@ int compressorCron(void) {
  *   EALREADY, EINVAL, EBUSY, EAGAIN  see canCompress() */
 static bool installJob(compressorJob *job) {
     if (job->frame == NULL) {
-        compressor_stats.counters.values_compressed_and_dropped_low_saving++;
+        compressor_stats.counters.compression_total_values_dropped_low_saving++;
         errno = ERANGE;
         return false;
     }
     serverDb *db = server.db[job->dbid];
     robj *o = db ? dbFind(db, job->key) : NULL;
     if (o == NULL) {
-        compressor_stats.counters.values_compressed_and_dropped_changed++;
+        compressor_stats.counters.compression_total_values_dropped_changed++;
         errno = ENOENT;
         return false;
     }
     if (!canCompress(o)) {
-        compressor_stats.counters.values_compressed_and_dropped_now_skipped++;
+        compressor_stats.counters.compression_total_values_dropped_not_eligible++;
         return false;
     }
 
     sds current = objectGetVal(o);
     size_t len = sdslen(current);
     if (len != sdslen(job->input) || memcmp(current, job->input, len) != 0) {
-        compressor_stats.counters.values_compressed_and_dropped_changed++;
+        compressor_stats.counters.compression_total_values_dropped_changed++;
         errno = ESTALE;
         return false;
     }
 
     if (!compressorFrameSavesMemory(compressorFrameAllocSize(current), compressorFrameAllocSize(job->frame),
                                     COMPRESSOR_MIN_SAVINGS_PCT)) {
-        compressor_stats.counters.values_compressed_and_dropped_low_saving++;
+        compressor_stats.counters.compression_total_values_dropped_low_saving++;
         errno = ERANGE;
         return false;
     }
     compressorSetCompressedValue(o, job->frame);
     job->frame = NULL;
-    compressor_stats.counters.values_compressed++;
+    compressor_stats.counters.compression_total_values_compressed++;
     return true;
 }
 
@@ -356,7 +356,7 @@ int compressorBeforeSleep(void) {
     int installed = 0;
     compressorJob *job;
     while (fifoPop(done, (void **)&job)) {
-        compressor_stats.counters.compression_time_us += job->compress_us;
+        compressor_stats.counters.compression_total_compression_time_us += job->compress_us;
         if (installJob(job)) installed++;
         freeJob(job);
     }

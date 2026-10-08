@@ -278,7 +278,7 @@ Commit `14df64e73`.
 - `src/compressor/compressor_stats.{h,c}`: the 27 fields of design doc
   section 9.1. `compression` is a non-default INFO section.
 - `canCompress()` sets `EALREADY` for a compressed value, so
-  `keys_skipped_already_compressed` counts it on its own (review finding).
+  `compression_total_keys_skipped_already_compressed` counts it on its own (review finding).
 - `freeStringObject()` updates the gauges only when the object still holds
   its frame. `objectSetKeyAndExpire()` moves the frame to a new object
   (review finding).
@@ -497,7 +497,7 @@ with `GET`.
 
 Why? The main thread does all the work for a command. When the value is
 compressed, the main thread must also unpack it. We measured it with
-`INFO compression`: `decompression_time_us / values_decompressed` is about
+`INFO compression`: `compression_total_decompression_time_us / compression_total_values_decompressed` is about
 1.5 microseconds per key. At 1.2 million requests per second, the main thread
 has only 0.8 microseconds for one command. So 1.5 extra microseconds is a
 lot. The commands wait in a line, and the wait time goes up.

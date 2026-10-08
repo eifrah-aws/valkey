@@ -41,9 +41,9 @@ sds compressorStatsInfo(sds info) {
     unsigned long long values = atomic_load_explicit(&g->compressed_values, memory_order_relaxed);
     unsigned long long original = atomic_load_explicit(&g->compressed_values_original_bytes, memory_order_relaxed);
     unsigned long long frames = atomic_load_explicit(&g->compressed_values_bytes, memory_order_relaxed);
-    unsigned long long dropped = st->values_compressed_and_dropped_low_saving +
-                                 st->values_compressed_and_dropped_changed +
-                                 st->values_compressed_and_dropped_now_skipped;
+    unsigned long long dropped = st->compression_total_values_dropped_low_saving +
+                                 st->compression_total_values_dropped_changed +
+                                 st->compression_total_values_dropped_not_eligible;
 
     return sdscatprintf(
         info,
@@ -54,32 +54,32 @@ sds compressorStatsInfo(sds info) {
         "compressed_values_original_bytes:%llu\r\n"
         "compressed_values_bytes:%llu\r\n"
         "compression_saved_bytes:%llu\r\n"
-        "compression_queue_length:%lu\r\n"
-        "temporary_copies:%lu\r\n"
-        "keys_checked:%llu\r\n"
-        "keys_eligible:%llu\r\n"
-        "keys_skipped_already_compressed:%llu\r\n"
-        "keys_skipped_not_string:%llu\r\n"
-        "keys_skipped_in_use:%llu\r\n"
-        "keys_skipped_size:%llu\r\n"
-        "keys_skipped_hot:%llu\r\n"
-        "keys_skipped_already_queued:%llu\r\n"
-        "values_queued:%llu\r\n"
-        "values_compressed:%llu\r\n"
-        "values_compressed_and_dropped:%llu\r\n"
-        "values_compressed_and_dropped_low_saving:%llu\r\n"
-        "values_compressed_and_dropped_changed:%llu\r\n"
-        "values_compressed_and_dropped_now_skipped:%llu\r\n"
-        "compression_paused_during_save:%llu\r\n"
-        "compression_time_us:%llu\r\n"
-        "values_decompressed:%llu\r\n"
-        "temporary_copies_made:%llu\r\n"
-        "decompression_time_us:%llu\r\n",
+        "compression_jobs_in_flight:%lu\r\n"
+        "compression_temporary_copies:%lu\r\n"
+        "compression_total_keys_checked:%llu\r\n"
+        "compression_total_keys_eligible:%llu\r\n"
+        "compression_total_keys_skipped_already_compressed:%llu\r\n"
+        "compression_total_keys_skipped_not_string:%llu\r\n"
+        "compression_total_keys_skipped_in_use:%llu\r\n"
+        "compression_total_keys_skipped_size:%llu\r\n"
+        "compression_total_keys_skipped_hot:%llu\r\n"
+        "compression_total_keys_skipped_already_queued:%llu\r\n"
+        "compression_total_jobs_queued:%llu\r\n"
+        "compression_total_values_compressed:%llu\r\n"
+        "compression_total_values_dropped:%llu\r\n"
+        "compression_total_values_dropped_low_saving:%llu\r\n"
+        "compression_total_values_dropped_changed:%llu\r\n"
+        "compression_total_values_dropped_not_eligible:%llu\r\n"
+        "compression_total_sweeps_paused_by_child:%llu\r\n"
+        "compression_total_compression_time_us:%llu\r\n"
+        "compression_total_values_decompressed:%llu\r\n"
+        "compression_total_temporary_copies_made:%llu\r\n"
+        "compression_total_decompression_time_us:%llu\r\n",
         compressorAlgIdName(server.compression_mode), server.compression_threads, values, original, frames,
-        original > frames ? original - frames : 0, compressorQueueLength(), compressor_plain_copies, st->keys_checked,
-        st->keys_eligible, st->keys_skipped_already_compressed, st->keys_skipped_not_string, st->keys_skipped_in_use, st->keys_skipped_size,
-        st->keys_skipped_hot, st->keys_skipped_already_queued, st->values_queued, st->values_compressed, dropped,
-        st->values_compressed_and_dropped_low_saving, st->values_compressed_and_dropped_changed,
-        st->values_compressed_and_dropped_now_skipped, st->compression_paused_during_save, st->compression_time_us,
-        st->values_decompressed, st->temporary_copies_made, st->decompression_time_us);
+        original > frames ? original - frames : 0, compressorJobsInFlight(), compressor_plain_copies, st->compression_total_keys_checked,
+        st->compression_total_keys_eligible, st->compression_total_keys_skipped_already_compressed, st->compression_total_keys_skipped_not_string, st->compression_total_keys_skipped_in_use, st->compression_total_keys_skipped_size,
+        st->compression_total_keys_skipped_hot, st->compression_total_keys_skipped_already_queued, st->compression_total_jobs_queued, st->compression_total_values_compressed, dropped,
+        st->compression_total_values_dropped_low_saving, st->compression_total_values_dropped_changed,
+        st->compression_total_values_dropped_not_eligible, st->compression_total_sweeps_paused_by_child, st->compression_total_compression_time_us,
+        st->compression_total_values_decompressed, st->compression_total_temporary_copies_made, st->compression_total_decompression_time_us);
 }

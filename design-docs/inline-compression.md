@@ -429,6 +429,8 @@ Types:
 - **Gauge:** a value right now. It can go up and down.
 - **Counter:** a total since the server started. It only goes up. `CONFIG RESETSTAT` sets it back to 0.
 
+Names: every field starts with `compression_` or `compressed_`. Every counter starts with `compression_total_`. A name without `total` is a value right now.
+
 All counters change only on the main thread, so they need no atomics. A worker writes its compression time into the job, and the main thread adds it up when it installs the job.
 
 | Name | Type | Unit | Description |
@@ -439,32 +441,32 @@ All counters change only on the main thread, so they need no atomics. A worker w
 | `compressed_values_original_bytes` | Gauge | bytes | Size of those values before compression. |
 | `compressed_values_bytes` | Gauge | bytes | Memory those values use now (allocation size). |
 | `compression_saved_bytes` | Gauge | bytes | Memory saved now: `compressed_values_original_bytes - compressed_values_bytes`. |
-| `compression_queue_length` | Gauge | values | Values waiting for compression, being compressed, or waiting to be installed. |
-| `temporary_copies` | Gauge | values | Temporary plain copies alive now (§7.2). |
-| `keys_checked` | Counter | keys | Keys the sweeper looked at. |
-| `keys_eligible` | Counter | keys | Keys that passed all checks. |
-| `keys_skipped_already_compressed` | Counter | keys | Skipped: the value is already compressed. Once most data is compressed, this is the most common reason. |
-| `keys_skipped_not_string` | Counter | keys | Skipped: not a plain (RAW) string, and not compressed. |
-| `keys_skipped_in_use` | Counter | keys | Skipped: another part of the server holds the value right now (refcount above 1). |
-| `keys_skipped_size` | Counter | keys | Skipped: size outside `compression-min-value-size` to `compression-max-value-size`. |
-| `keys_skipped_hot` | Counter | keys | Skipped: clients used the key recently (not cold). |
-| `keys_skipped_already_queued` | Counter | keys | Eligible, but the key is already in the queue. |
-| `values_queued` | Counter | values | Values sent to the workers. |
-| `values_compressed` | Counter | values | Values compressed and stored. |
-| `values_compressed_and_dropped` | Counter | values | Values compressed, then not stored. The total of the three counters below. |
-| `values_compressed_and_dropped_low_saving` | Counter | values | Dropped: the saving was under the 10% net-savings guard (§6.4, §9). |
-| `values_compressed_and_dropped_changed` | Counter | values | Dropped: the key changed or was deleted while it waited. |
-| `values_compressed_and_dropped_now_skipped` | Counter | values | Dropped: the key became hot, in use, or out of the size range while it waited. |
-| `compression_paused_during_save` | Counter | sweeper runs | Sweeper runs skipped because a child process (save) was running. |
-| `compression_time_us` | Counter | microseconds | Total time of all workers spent compressing. With more than one worker, it can grow faster than real time. |
-| `values_decompressed` | Counter | values | Values that a read or a write made plain again. |
-| `temporary_copies_made` | Counter | values | Temporary plain copies made, during a save or for module reads. |
-| `decompression_time_us` | Counter | microseconds | Total main-thread time spent decompressing. This is the latency cost on reads. |
+| `compression_jobs_in_flight` | Gauge | jobs | Values waiting for compression, being compressed, or waiting to be installed. |
+| `compression_temporary_copies` | Gauge | values | Temporary plain copies alive now (§7.2). |
+| `compression_total_keys_checked` | Counter | keys | Keys the sweeper looked at. |
+| `compression_total_keys_eligible` | Counter | keys | Keys that passed all checks. |
+| `compression_total_keys_skipped_already_compressed` | Counter | keys | Skipped: the value is already compressed. Once most data is compressed, this is the most common reason. |
+| `compression_total_keys_skipped_not_string` | Counter | keys | Skipped: not a plain (RAW) string, and not compressed. |
+| `compression_total_keys_skipped_in_use` | Counter | keys | Skipped: another part of the server holds the value right now (refcount above 1). |
+| `compression_total_keys_skipped_size` | Counter | keys | Skipped: size outside `compression-min-value-size` to `compression-max-value-size`. |
+| `compression_total_keys_skipped_hot` | Counter | keys | Skipped: clients used the key recently (not cold). |
+| `compression_total_keys_skipped_already_queued` | Counter | keys | Eligible, but the key is already in the queue. |
+| `compression_total_jobs_queued` | Counter | jobs | Values sent to the workers. |
+| `compression_total_values_compressed` | Counter | values | Values compressed and stored. |
+| `compression_total_values_dropped` | Counter | values | Values compressed, then not stored. The total of the three counters below. |
+| `compression_total_values_dropped_low_saving` | Counter | values | Dropped: the saving was under the 10% net-savings guard (§6.4, §9). |
+| `compression_total_values_dropped_changed` | Counter | values | Dropped: the key changed or was deleted while it waited. |
+| `compression_total_values_dropped_not_eligible` | Counter | values | Dropped: the key became hot, in use, or out of the size range while it waited. |
+| `compression_total_sweeps_paused_by_child` | Counter | sweeper runs | Sweeper runs skipped because a child process (`BGSAVE`, `BGREWRITEAOF`) was running. |
+| `compression_total_compression_time_us` | Counter | microseconds | Total time of all workers spent compressing. With more than one worker, it can grow faster than real time. |
+| `compression_total_values_decompressed` | Counter | values | Values that a read or a write made plain again. |
+| `compression_total_temporary_copies_made` | Counter | values | Temporary plain copies made, during a save or for module reads. |
+| `compression_total_decompression_time_us` | Counter | microseconds | Total main-thread time spent decompressing. This is the latency cost on reads. |
 
 How the counters fit together:
-- `keys_checked = keys_eligible + keys_skipped_already_compressed + keys_skipped_not_string + keys_skipped_in_use + keys_skipped_size + keys_skipped_hot`
-- `keys_eligible = values_queued + keys_skipped_already_queued`
-- `values_queued = values_compressed + values_compressed_and_dropped + compression_queue_length`
+- `compression_total_keys_checked = compression_total_keys_eligible + compression_total_keys_skipped_already_compressed + compression_total_keys_skipped_not_string + compression_total_keys_skipped_in_use + compression_total_keys_skipped_size + compression_total_keys_skipped_hot`
+- `compression_total_keys_eligible = compression_total_jobs_queued + compression_total_keys_skipped_already_queued`
+- `compression_total_jobs_queued = compression_total_values_compressed + compression_total_values_dropped + compression_jobs_in_flight`
 
 Implementation notes (`src/compressor/compressor_stats.{h,c}`):
 - `compression` is not a default INFO section. `INFO compression`, `INFO all`, and `INFO everything` show it. A plain `INFO` does not, so its output does not change.

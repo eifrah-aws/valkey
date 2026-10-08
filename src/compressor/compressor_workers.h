@@ -37,7 +37,7 @@ int compressorWorkersKill(void);
 int compressorCron(void);
 
 /* Jobs queued, running, or done but not installed yet. */
-unsigned long compressorQueueLength(void);
+unsigned long compressorJobsInFlight(void);
 
 /* Installs the frames that the workers finished. Called from beforeSleep().
  * Returns the number of frames installed. */
