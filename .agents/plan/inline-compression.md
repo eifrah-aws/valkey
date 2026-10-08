@@ -304,9 +304,17 @@ What 3a did not do. Many of these already work in 3a, because they go
 through `lookupKey()` and get a plain value. 3b makes them keep the value
 compressed, and checks the code paths that do not use `lookupKey()`.
 
-- Use `LOOKUP_NODECOMPRESS` in the callers listed in "Facts" item 3:
-  `DUMP`, `MIGRATE`, `DEBUG DIGEST-VALUE` (plain copy), and `TYPE`,
-  `EXISTS`, `TTL`/`PTTL` (they do not read the bytes).
+- DONE: `LOOKUP_NODECOMPRESS` in `TYPE`, `EXISTS`,
+  `TTL`/`PTTL`/`EXPIRETIME`/`PEXPIRETIME`, `DUMP`, and `MIGRATE`. `DUMP` and
+  `MIGRATE` get the frame, and `rdbSaveStringObject()` writes its plain
+  bytes. `DEBUG DIGEST-VALUE` already used `dbFind()`, so it needed no
+  change. Without this, a `SCAN` + `TYPE`/`TTL` or a `DUMP` backup over the
+  keyspace decompressed every value, and `LOOKUP_NOTOUCH` kept the keys
+  cold, so the sweeper compressed them again. Tests in
+  `compression-encoding.tcl`.
+- Left: commands that do not read the bytes but still decompress. `TOUCH`
+  (read lookup), and `EXPIRE`, `PERSIST`, `RENAME`, `MOVE`, `COPY` (write
+  lookups, which decompress in place).
 - Slot migration export: check `src/cluster_migrateslots.c`, and how it reads
   values.
 - Audit all direct reads of `obj->encoding` / `objectGetEncoding()` /
@@ -318,9 +326,8 @@ compressed, and checks the code paths that do not use `lookupKey()`.
 - Forkless save: remove the startup refusal. A read of a key that the
   forkless thread holds must not change the value in place.
 - `DEBUG COMPRESS-KEY <key>`: compress one key now, for tests.
-- Tests: `DUMP`/`RESTORE`, `TYPE`/`EXISTS`/`TTL` keep the value compressed,
-  keyspace notifications unchanged, unit test for object free and size with
-  a frame.
+- Tests: keyspace notifications unchanged, unit test for object free and
+  size with a frame.
 
 ## Phase 4 - Hot-key LRU
 

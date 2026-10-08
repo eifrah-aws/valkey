@@ -944,7 +944,7 @@ void existsCommand(client *c) {
     int j;
 
     for (j = 1; j < c->argc; j++) {
-        if (lookupKeyReadWithFlags(c->db, c->argv[j], LOOKUP_NOTOUCH)) count++;
+        if (lookupKeyReadWithFlags(c->db, c->argv[j], LOOKUP_NOTOUCH | LOOKUP_NODECOMPRESS)) count++;
     }
     addReplyLongLong(c, count);
 }
@@ -1469,7 +1469,7 @@ void lastsaveCommand(client *c) {
 
 void typeCommand(client *c) {
     robj *o;
-    o = lookupKeyReadWithFlags(c->db, c->argv[1], LOOKUP_NOTOUCH);
+    o = lookupKeyReadWithFlags(c->db, c->argv[1], LOOKUP_NOTOUCH | LOOKUP_NODECOMPRESS);
     addReplyStatus(c, getObjectTypeName(o));
 }
 

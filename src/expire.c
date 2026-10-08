@@ -907,7 +907,7 @@ void ttlGenericCommand(client *c, int output_ms, int output_abs) {
     mstime_t expire, ttl = -1;
 
     /* If the key does not exist at all, return -2 */
-    if ((o = lookupKeyReadWithFlags(c->db, c->argv[1], LOOKUP_NOTOUCH)) == NULL) {
+    if ((o = lookupKeyReadWithFlags(c->db, c->argv[1], LOOKUP_NOTOUCH | LOOKUP_NODECOMPRESS)) == NULL) {
         addReplyLongLong(c, -2);
         return;
     }

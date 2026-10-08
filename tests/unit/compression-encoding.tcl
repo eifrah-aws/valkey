@@ -85,6 +85,58 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         assert_equal compressed [r object encoding $k]
     }
 
+    test {Commands that do not read the bytes do not decompress} {
+        set k [new_key]
+        r set $k [compression_value] EX 1000
+        compress_key r $k
+        set before [getInfoProperty [r info compression] compression_total_values_decompressed]
+        assert_equal string [r type $k]
+        assert_equal 1 [r exists $k]
+        assert_range [r ttl $k] 900 1000
+        assert_range [r pttl $k] 900000 1000000
+        assert_morethan [r expiretime $k] 0
+        assert_equal compressed [r object encoding $k]
+        assert_equal $before [getInfoProperty [r info compression] compression_total_values_decompressed]
+    }
+
+    test {DUMP does not decompress, and RESTORE gives the same value} {
+        set k [new_key]
+        r set $k [compression_value 3]
+        compress_key r $k
+        set payload [r dump $k]
+        assert_equal compressed [r object encoding $k]
+        set k2 [new_key]
+        r restore $k2 0 $payload
+        assert_equal [compression_value 3] [r get $k2]
+        assert_equal [compression_value 3] [r get $k]
+    }
+
+    test {DEBUG DIGEST-VALUE does not decompress} {
+        set k [new_key]
+        r set $k [compression_value 4]
+        compress_key r $k
+        set digest [r debug digest-value $k]
+        assert_equal compressed [r object encoding $k]
+        r get $k
+        assert_equal raw [r object encoding $k]
+        assert_equal $digest [r debug digest-value $k]
+    } {} {needs:debug}
+
+    test {MIGRATE COPY does not decompress the source} {
+        start_server {overrides {compression-mode off}} {
+            set src [srv -1 client]
+            set dst [srv 0 client]
+            set k [new_key]
+            $src set $k [compression_value 5]
+            compress_key $src $k
+            # The test clients use db 9.
+            assert_equal OK [$src migrate [srv 0 host] [srv 0 port] $k 9 5000 COPY]
+            assert_equal compressed [$src object encoding $k]
+            assert_equal [compression_value 5] [$dst get $k]
+            assert_equal [compression_value 5] [$src get $k]
+        }
+    }
+
     test {Small values are not compressed} {
         set k [new_key]
         set k2 [new_key]

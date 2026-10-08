@@ -185,8 +185,9 @@ void dumpCommand(client *c) {
     robj *o;
     rio payload;
 
-    /* Check if the key is here. */
-    if ((o = lookupKeyRead(c->db, c->argv[1])) == NULL) {
+    /* Check if the key is here. A compressed value stays compressed: the RDB
+     * code writes its plain bytes. */
+    if ((o = lookupKeyReadWithFlags(c->db, c->argv[1], LOOKUP_NODECOMPRESS)) == NULL) {
         addReplyNull(c);
         return;
     }
@@ -505,7 +506,8 @@ void migrateCommand(client *c) {
     int oi = 0;
 
     for (j = 0; j < num_keys; j++) {
-        if ((ov[oi] = lookupKeyRead(c->db, c->argv[first_key + j])) != NULL) {
+        /* Like DUMP, a compressed value stays compressed. */
+        if ((ov[oi] = lookupKeyReadWithFlags(c->db, c->argv[first_key + j], LOOKUP_NODECOMPRESS)) != NULL) {
             kv[oi] = c->argv[first_key + j];
             oi++;
         }
