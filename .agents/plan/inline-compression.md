@@ -31,8 +31,14 @@ All commits below are pushed to `origin/valkey-inline-compression` (the
 | LFU threshold 4, `compression-max-inflight-requests` setting | DONE | this commit |
 | 5 - Background sweeper | PARTLY DONE (see Phase 5) | `eba2a8ffd`, `14df64e73` |
 | 3b - Other read paths | NEXT | - |
-| 4 to 11 | TODO | - |
-| Off-loading: decompress in the I/O thread | IDEA, after Phase 11 | - |
+| 4 - Hot-key LRU | TODO | - |
+| 6 - RDB and AOF preamble persistence | TODO | - |
+| 7 - Inline compression on import and replica apply (RESTORE, MIGRATE) | TODO | - |
+| 8 - Measurements | TODO | - |
+| 9 - Documentation | TODO | - |
+| 10 - Dictionary registry | TODO, after the measurements | - |
+| 11 - zstd backend and training | TODO, last | - |
+| Off-loading: decompress in the I/O thread | IDEA, not scheduled | - |
 
 ## Phase 0 - Compressor interface and LZ4 backend (DONE, pushed)
 
@@ -86,11 +92,11 @@ are decided, or are open until the matching phase.
 4. **Name clash.** `src/compression.{c,h}` is the RDB / replication stream
    compression. Keep the `compressor_*` prefix for all new files. `INFO
    compression` does not clash with any other INFO section (checked). Check
-   the `COMPRESSION` command name in Phase 7.
-5. **RDB version.** Current `RDB_VERSION` is 81. Phase 8 bumps it.
+   the `COMPRESSION` command name in Phase 11.
+5. **RDB version.** Current `RDB_VERSION` is 81. Phase 6 bumps it.
 6. **zstd is not vendored, but it is already an optional system library.**
    `src/Makefile` has `BUILD_ZSTD` (default `no`, static libzstd >= 1.4.7),
-   used by `src/compression_zstd.c` under `HAVE_ZSTD`. Phase 7 should reuse
+   used by `src/compression_zstd.c` under `HAVE_ZSTD`. Phase 11 should reuse
    this, not vendor `deps/zstd`. Open question: the default mode `zstd`
    needs `BUILD_ZSTD=yes`. LZ4 needs a trainer too; the plan uses the zstd
    `ZDICT` trainer for both.
@@ -168,7 +174,7 @@ Configs exist and are checked. Nothing compresses yet.
   | `compression-max-value-size` | 1-131072 | 131072 | Yes |
   | `compression-dict-size` | 1024-1048576 | 102400 | No |
 
-  - `compression-mode` rejects every other value, `zstd` too, until Phase 7.
+  - `compression-mode` rejects every other value, `zstd` too, until Phase 11.
   - `compression-threads` is 1-16 (changed in 3a). 0 is rejected.
   - The max value size limit is `COMPRESSOR_FRAME_MAX_VALUE_LEN`. A bigger
     value is rejected, never clamped.
@@ -177,7 +183,7 @@ Configs exist and are checked. Nothing compresses yet.
 - `tests/unit/introspection.tcl`: the three startup-only settings are added
   to the skip list of `CONFIG sanity`.
 - `tests/unit/compression-config.tcl` (7 tests).
-- Docs in `valkey.conf` come in Phase 11.
+- Docs in `valkey.conf` come in Phase 9.
 
 ## Phase 3a - Full cycle: encoding, read path, background workers (DONE, pushed)
 
@@ -268,7 +274,7 @@ we can run benchmarks. This also does most of Phase 5.
   test module `tests/modules/compression.c` with
   `tests/unit/moduleapi/compression.tcl` (4 tests).
 - Not yet: the hot-key list (Phase 4), the magic-byte skip table and the
-  dictionary rule (Phase 5). Sampling does not skip importing hashtables yet
+  dictionary rule (Phase 11). Sampling does not skip importing hashtables yet
   (design section 6.1). `INFO compression` came later, in `14df64e73`.
 
 ## INFO compression (DONE, pushed; part of Phase 5)
@@ -287,7 +293,7 @@ Commit `14df64e73`.
   `compressorStringObjectFreed()`.
 - `CONFIG RESETSTAT` resets the counters, not the gauges. Gauges and counters
   are two structs, so the reset never writes the gauges (review finding).
-- Phase 8 (RDB load of frames) must add loaded frames to the gauges.
+- Phase 6 (RDB load of frames) must add loaded frames to the gauges.
 - Tests: `tests/unit/compression-info.tcl` (11 tests), including checks that
   the counters add up.
   `src/unit/test_compressor_stats.cpp` (4 tests).
@@ -308,7 +314,7 @@ compressed, and checks the code paths that do not use `lookupKey()`.
   `lookupKey()`. Put each one in one of the four classes of design section
   7.1, and list them in the PR description.
 - Free path: call the backend `release()` and drop the dictionary user count
-  (stub until Phase 6).
+  (stub until Phase 10).
 - Forkless save: remove the startup refusal. A read of a key that the
   forkless thread holds must not change the value in place.
 - `DEBUG COMPRESS-KEY <key>`: compress one key now, for tests.
@@ -347,16 +353,8 @@ Left:
 
 - Magic-byte skip table (design section 6.1). A `memcmp` on the first bytes
   only. Count the skips in `INFO compression`.
-- Dictionary rule (decided):
-  - `zstd`: do not compress until the first dictionary exists. The first
-    training starts at `COMPRESSOR_DICT_MIN_TRAINING_KEYS` keys. Reason:
-    without a dictionary small values save little, these frames are never
-    compressed again with the new dictionary, and training needs plain
-    sample values.
-  - `lz4`: compress without a dictionary (`dict_id` 0) from the start (as
-    today).
-  - Count values skipped while waiting for a dictionary in
-    `INFO compression`.
+- `lz4` compresses without a dictionary (`dict_id` 0) from the start (as
+  today). The `zstd` dictionary rule is in Phase 11.
 - Skip importing hashtables when sampling (slot import).
 - Check the behavior during `CLIENT PAUSE WRITE`, and on a replica
   (recommended: the sweeper runs on replicas too; it is local memory).
@@ -366,10 +364,96 @@ Left:
   `FLUSHALL` while a job runs; values in an already-compressed format are
   skipped (after the skip table).
 
-## Phase 6 - Dictionary registry
+## Phase 6 - RDB and AOF preamble persistence
+
+Goal: save and load values as-is.
+
+- Bump `RDB_VERSION`. Define:
+  - A new value type for a compressed string frame.
+  - A dictionary section written before the keyspace (new opcode or aux
+    field): `algorithm_id`, `format_version`, `dict_id`, bytes. Only
+    dictionaries referenced by at least one frame (or all live ones -
+    simpler, decide in PR). Dictionaries come later (Phase 10), so this
+    phase defines the section and always writes it empty. Then Phase 10
+    needs no second version bump. Until Phase 10, a load fails on a frame
+    with `dict_id != 0`.
+- Save: write the frame bytes as-is. AOF rewrite with preamble follows the
+  same code. Command-form AOF stays plain (Phase 3).
+- Load: check every frame (`compressorFrameParse()`). Any error fails the
+  load. Phase 10 adds: rebuild the dictionary registry before any value,
+  check that each frame's dictionary is there, and rebuild user counts.
+- Loaded frames must be added to the `INFO compression` gauges
+  (`compressorStatsAddValue()`), because they do not go through
+  `compressorSetCompressedValue()`.
+- Loaded values must keep their LRU/LFU data, so they are not cold at once
+  only because they were loaded (check).
+- `DEBUG RELOAD`, `replicaof` full sync (disk and diskless), `rdb-key-save`
+  paths, module `RM_LoadDataTypeFromString` are not affected - check.
+- Downgrade: an old server must refuse the new RDB version cleanly. Decide
+  and document: a "save as plain" option for downgrade (recommended:
+  `DEBUG` or config switch that saves frames as plain strings).
+- `valkey-check-rdb` must understand the new opcode and type.
+- Tests: Tcl `tests/integration/compression-rdb.tcl` - save/load mixed
+  keyspace, corrupt frame, unknown algorithm, frame with `dict_id != 0`
+  (the missing dictionary tests come in Phase 10), full sync keeps
+  encoding, AOF with and without preamble, mixed multipart AOF. Add a fixed
+  RDB fixture under `tests/assets/`.
+
+## Phase 7 - Inline compression on import and replica apply (RESTORE, MIGRATE)
+
+Goal: no memory spike during migration and replica catch-up.
+
+- Slot migration import (atomic slot migration and `RESTORE`-based
+  `MIGRATE`): compress each eligible value before install.
+- Replica applying the stream: commands that create or replace an eligible
+  string compress the result before install. After Phase 10, use the
+  replica's own active dictionary.
+- Same eligibility and net-savings rules as the sweeper, but no coldness
+  gate.
+- Tests: cluster test for slot migration with compression on the target
+  only; replication test with compression on the replica only;
+  `DEBUG DIGEST` equal on both sides.
+
+## Phase 8 - Measurements (design TODOs)
+
+Run with LZ4 and no dictionary, before zstd and dictionaries (Phases 10 and
+11). The numbers decide if zstd and dictionaries are worth the work, and are
+the base to compare them with. Run the same scripts again after Phase 11.
+One script per TODO, results added to the design doc.
+
+- Inline migration compression: destination peak memory, throughput,
+  per-value latency, event-loop time.
+- Inline replication compression: replica peak memory, lag, catch-up time.
+- AOF load: startup time and peak memory for both preamble settings.
+- Synchronous decompression on egress paths: latency, throughput, peak
+  temporary memory.
+- Decompress on first read: p50/p99/p99.9 latency of the first read and of later reads.
+- Hot-key LRU: working sets below and above 100,000 keys.
+- Wire format and replication decisions: plain vs compressed transfer.
+- AOF persistence: rewrite time, child memory, copy-on-write.
+- Overall target: >= 30% memory saving, < 20% TPS cost.
+
+## Phase 9 - Documentation
+
+- `valkey.conf` entries for the settings. Phase 11 adds the LZ4 vs zstd
+  note.
+- `INFO compression` field list: already in design doc section 9.1. Add it
+  to the user docs.
+- `COMPRESSION` command docs come with the command in Phase 11.
+- Design doc: moved to `design-docs/inline-compression.md` and aligned with
+  the code up to `INFO compression` (encoding 14, 10-byte header,
+  allocation-size savings check, byte compare, decompress in `lookupKey()`,
+  plain copies during a child and for module read handles, section 9.1).
+  Keep it in step with each later phase.
+
+## Phase 10 - Dictionary registry
 
 Goal: shared, frozen dictionaries with user counts. Still only LZ4.
 
+New algorithms and dictionaries come last, after the measurements (Phase 8).
+
+- RDB: write the dictionary section that Phase 6 defined, and load it before
+  any value. Add the missing dictionary tests.
 - New `src/compressor/compressor_dict.{h,c}`: registry built on `compressorDict`
   (`{id, algorithm_id, cdict}`, already in `compressor_alg.h`), plus
   `bytes` and `users`, up to `DICT_MAX_VERSIONS`. One active entry.
@@ -382,7 +466,7 @@ Goal: shared, frozen dictionaries with user counts. Still only LZ4.
   `bgiteration` / threaded save paths.
 - Unit tests `src/unit/test_compressor_dict.cpp`.
 
-## Phase 7 - zstd backend and training
+## Phase 11 - zstd backend and training
 
 Goal: default algorithm and trained dictionaries.
 
@@ -405,85 +489,18 @@ Goal: default algorithm and trained dictionaries.
   JSON command file under `src/commands/` and run
   `utils/generate-command-code.py`.
 - Remove the `zstd` rejection from Phase 2.
+- Dictionary rule (decided, moved here from Phase 5): with `zstd`, do not
+  compress until the first dictionary exists. The first training starts at
+  `COMPRESSOR_DICT_MIN_TRAINING_KEYS` keys. Reason: without a dictionary
+  small values save little, these frames are never compressed again with
+  the new dictionary, and training needs plain sample values. Count values
+  skipped while waiting for a dictionary in `INFO compression`.
+- Docs: the LZ4 vs zstd note in `valkey.conf`, and the `COMPRESSION` command
+  docs.
 - Tests: unit tests for the zstd backend (same matrix as LZ4); Tcl tests for
   first training, retrain, drain of the old dictionary, max versions.
 
-## Phase 8 - RDB and AOF preamble persistence
-
-Goal: save and load values as-is.
-
-- Bump `RDB_VERSION`. Define:
-  - A dictionary section written before the keyspace (new opcode or aux
-    field): `algorithm_id`, `format_version`, `dict_id`, bytes. Only
-    dictionaries referenced by at least one frame (or all live ones -
-    simpler, decide in PR).
-  - A new value type for a compressed string frame.
-- Save: write the frame bytes as-is. AOF rewrite with preamble follows the
-  same code. Command-form AOF stays plain (Phase 3).
-- Load: rebuild the registry before any value, check every frame
-  (`compressorFrameParse()` and dictionary present), rebuild user counts.
-  Any error fails the load.
-- Loaded frames must be added to the `INFO compression` gauges
-  (`compressorStatsAddValue()`), because they do not go through
-  `compressorSetCompressedValue()`.
-- Loaded values must keep their LRU/LFU data, so they are not cold at once
-  only because they were loaded (check).
-- `DEBUG RELOAD`, `replicaof` full sync (disk and diskless), `rdb-key-save`
-  paths, module `RM_LoadDataTypeFromString` are not affected - check.
-- Downgrade: an old server must refuse the new RDB version cleanly. Decide
-  and document: a "save as plain" option for downgrade (recommended:
-  `DEBUG` or config switch that saves frames as plain strings).
-- `valkey-check-rdb` must understand the new opcode and type.
-- Tests: Tcl `tests/integration/compression-rdb.tcl` - save/load mixed
-  keyspace, corrupt frame, missing dictionary, unknown algorithm, full sync
-  keeps encoding, AOF with and without preamble, mixed multipart AOF.
-  Add a fixed RDB fixture under `tests/assets/`.
-
-## Phase 9 - Inline compression on import and replica apply
-
-Goal: no memory spike during migration and replica catch-up.
-
-- Slot migration import (atomic slot migration and `RESTORE`-based
-  `MIGRATE`): compress each eligible value before install.
-- Replica applying the stream: commands that create or replace an eligible
-  string compress the result before install. Use the replica's own active
-  dictionary.
-- Same eligibility and net-savings rules as the sweeper, but no coldness
-  gate.
-- Tests: cluster test for slot migration with compression on the target
-  only; replication test with compression on the replica only;
-  `DEBUG DIGEST` equal on both sides.
-
-## Phase 10 - Measurements (design TODOs)
-
-Run before the feature leaves experimental status. One script per TODO,
-results added to the design doc.
-
-- Inline migration compression: destination peak memory, throughput,
-  per-value latency, event-loop time.
-- Inline replication compression: replica peak memory, lag, catch-up time.
-- AOF load: startup time and peak memory for both preamble settings.
-- Synchronous decompression on egress paths: latency, throughput, peak
-  temporary memory.
-- Decompress on first read: p50/p99/p99.9 latency of the first read and of later reads.
-- Hot-key LRU: working sets below and above 100,000 keys.
-- Wire format and replication decisions: plain vs compressed transfer.
-- AOF persistence: rewrite time, child memory, copy-on-write.
-- Overall target: >= 30% memory saving, < 20% TPS cost.
-
-## Phase 11 - Documentation
-
-- `valkey.conf` entries for the five settings, with the LZ4 vs zstd note.
-- `INFO compression` field list: already in design doc section 9.1. Add it
-  to the user docs.
-- `COMPRESSION` command docs.
-- Design doc: moved to `design-docs/inline-compression.md` and aligned with
-  the code up to `INFO compression` (encoding 14, 10-byte header,
-  allocation-size savings check, byte compare, decompress in `lookupKey()`,
-  plain copies during a child and for module read handles, section 9.1).
-  Keep it in step with each later phase.
-
-## Off-loading: decompress in the I/O thread (IDEA, after Phase 11)
+## Off-loading: decompress in the I/O thread (IDEA, not scheduled)
 
 ### The problem
 
@@ -635,7 +652,7 @@ plain from then on. No worker job is needed.
 
 ### Open points
 
-1. **Dictionaries (Phase 6 and 7).** The I/O thread needs the dictionary
+1. **Dictionaries (Phase 10 and 11).** The I/O thread needs the dictionary
    that the frame header names (`dict_id`). The answer does not hold the
    object, so nothing keeps the dictionary alive while the part waits in the
    buffer. Two options: count the waiting parts per `dict_id` on the main
