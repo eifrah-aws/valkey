@@ -516,6 +516,8 @@ robj *objectSetKeyAndExpire(robj *o, const_sds key, long long expire) {
     } else if (objectGetType(o) == OBJ_STRING && objectGetEncoding(o) == OBJ_ENCODING_RAW) {
         /* Dup the string. */
         ptr = sdsdup(o->val_ptr);
+    } else if (compressorIsCompressedString(o)) {
+        ptr = compressorDupFrame(o);
     } else {
         serverAssert(objectGetType(o) != OBJ_STRING);
         /* There are multiple references to this non-string object. Most types
@@ -619,6 +621,10 @@ robj *dupStringObject(const robj *o) {
         d = createObject(OBJ_STRING, NULL);
         d->encoding = OBJ_ENCODING_INT;
         d->val_ptr = o->val_ptr;
+        return d;
+    case OBJ_ENCODING_COMPRESSED:
+        d = createObject(OBJ_STRING, compressorDupFrame(o));
+        d->encoding = OBJ_ENCODING_COMPRESSED;
         return d;
     default: serverPanic("Wrong encoding."); break;
     }

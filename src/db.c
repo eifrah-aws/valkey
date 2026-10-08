@@ -1553,7 +1553,12 @@ void renameGenericCommand(client *c, int nx) {
      * if the key exists, however we still return an error on unexisting key. */
     if (sdscmp(objectGetVal(c->argv[1]), objectGetVal(c->argv[2])) == 0) samekey = 1;
 
-    if ((o = lookupKeyWriteOrReply(c, c->argv[1], shared.nokeyerr)) == NULL) return;
+    /* RENAME does not read the bytes, so a compressed value stays compressed.
+     * MOVE and COPY do the same. */
+    if ((o = lookupKeyWriteWithFlags(c->db, c->argv[1], LOOKUP_NODECOMPRESS)) == NULL) {
+        addReplyOrErrorObject(c, shared.nokeyerr);
+        return;
+    }
 
     if (samekey) {
         addReply(c, nx ? shared.czero : shared.ok);
@@ -1562,7 +1567,7 @@ void renameGenericCommand(client *c, int nx) {
 
     incrRefCount(o);
     expire = objectGetExpire(o);
-    if (lookupKeyWrite(c->db, c->argv[2]) != NULL) {
+    if (lookupKeyWriteWithFlags(c->db, c->argv[2], LOOKUP_NODECOMPRESS) != NULL) {
         if (nx) {
             decrRefCount(o);
             addReply(c, shared.czero);
@@ -1635,7 +1640,7 @@ void moveCommand(client *c) {
     }
 
     /* Check if the element exists and get a reference */
-    o = lookupKeyWrite(c->db, c->argv[1]);
+    o = lookupKeyWriteWithFlags(c->db, c->argv[1], LOOKUP_NODECOMPRESS);
     if (!o) {
         addReply(c, shared.czero);
         return;
@@ -1643,7 +1648,7 @@ void moveCommand(client *c) {
     expire = objectGetExpire(o);
 
     /* Without REPLACE, return zero if the key already exists in the target DB. */
-    if (lookupKeyWrite(dst, c->argv[1]) != NULL && (set_key_flags & SETKEY_DOESNT_EXIST)) {
+    if (lookupKeyWriteWithFlags(dst, c->argv[1], LOOKUP_NODECOMPRESS) != NULL && (set_key_flags & SETKEY_DOESNT_EXIST)) {
         addReply(c, shared.czero);
         return;
     }
@@ -1709,7 +1714,7 @@ void copyCommand(client *c) {
     }
 
     /* Check if the element exists and get a reference */
-    o = lookupKeyRead(c->db, key);
+    o = lookupKeyReadWithFlags(c->db, key, LOOKUP_NODECOMPRESS);
     if (!o) {
         addReply(c, shared.czero);
         return;
@@ -1718,7 +1723,7 @@ void copyCommand(client *c) {
 
     /* Return zero if the key already exists in the target DB.
      * If REPLACE option is selected, delete newkey from targetDB. */
-    if (lookupKeyWrite(dst, newkey) != NULL) {
+    if (lookupKeyWriteWithFlags(dst, newkey, LOOKUP_NODECOMPRESS) != NULL) {
         if (replace) {
             delete = 1;
         } else {

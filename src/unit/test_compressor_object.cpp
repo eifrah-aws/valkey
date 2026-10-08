@@ -13,6 +13,7 @@
 extern "C" {
 #include "compressor/compressor_frame.h"
 #include "compressor/compressor_object.h"
+#include "compressor/compressor_stats.h"
 #include "monotonic.h"
 #include "server.h"
 }
@@ -114,5 +115,24 @@ TEST_F(CompressorObjectTest, GetDecodedObjectGivesPlainCopy) {
     EXPECT_EQ(memcmp(objectGetVal(dec), value, value_len), 0);
     EXPECT_EQ(objectGetEncoding(o), OBJ_ENCODING_COMPRESSED);
     decrRefCount(dec);
+    decrRefCount(o);
+}
+
+TEST_F(CompressorObjectTest, DupStringObjectCopiesTheFrame) {
+    robj *o = createCompressed(value, value_len);
+    unsigned long long before = compressor_stats.gauges.compressed_values;
+    robj *d = dupStringObject(o);
+    ASSERT_TRUE(d != o);
+    EXPECT_EQ(objectGetEncoding(d), OBJ_ENCODING_COMPRESSED);
+    EXPECT_TRUE(objectGetVal(d) != objectGetVal(o));
+    EXPECT_EQ(compressor_stats.gauges.compressed_values, before + 1);
+    EXPECT_EQ(equalStringObjects(o, d), 1);
+
+    /* The copy is a frame of its own: it can be decompressed alone. */
+    compressorDecompressStringObject(d);
+    ASSERT_EQ(sdslen((sds)objectGetVal(d)), value_len);
+    EXPECT_EQ(memcmp(objectGetVal(d), value, value_len), 0);
+    EXPECT_EQ(objectGetEncoding(o), OBJ_ENCODING_COMPRESSED);
+    decrRefCount(d);
     decrRefCount(o);
 }

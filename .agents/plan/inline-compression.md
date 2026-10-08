@@ -312,9 +312,11 @@ compressed, and checks the code paths that do not use `lookupKey()`.
   keyspace decompressed every value, and `LOOKUP_NOTOUCH` kept the keys
   cold, so the sweeper compressed them again. Tests in
   `compression-encoding.tcl`.
-- Left: commands that do not read the bytes but still decompress. `TOUCH`
-  (read lookup), and `EXPIRE`, `PERSIST`, `RENAME`, `MOVE`, `COPY` (write
-  lookups, which decompress in place).
+- DONE: `LOOKUP_NODECOMPRESS` in `TOUCH`, `EXPIRE`/`PEXPIRE`/`EXPIREAT`/
+  `PEXPIREAT`, `PERSIST`, `RENAME`/`RENAMENX`, `MOVE`, and `COPY` (source and
+  destination). `COPY` copies the frame with `compressorDupFrame()` (in
+  `dupStringObject()`), so the copy is not decompressed. The same helper
+  covers `objectSetKeyAndExpire()` with a refcount above 1.
 - Slot migration export: check `src/cluster_migrateslots.c`, and how it reads
   values.
 - Audit all direct reads of `obj->encoding` / `objectGetEncoding()` /

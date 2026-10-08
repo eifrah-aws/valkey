@@ -137,6 +137,122 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         }
     }
 
+    test {Commands that change only the key or the TTL do not decompress} {
+        r flushall
+        set before [getInfoProperty [r info compression] compression_total_values_decompressed]
+        set k [new_key]
+        r set $k [compression_value 6]
+        compress_key r $k
+
+        assert_equal 1 [r expire $k 1000]
+        assert_equal 1 [r pexpire $k 1000000]
+        assert_equal 1 [r expireat $k [expr {[clock seconds] + 1000}]]
+        assert_equal 1 [r pexpireat $k [expr {[clock milliseconds] + 1000000}]]
+        assert_range [r ttl $k] 900 1000
+        assert_equal 1 [r persist $k]
+        assert_equal -1 [r ttl $k]
+        assert_equal 1 [r touch $k]
+        assert_equal compressed [r object encoding $k]
+
+        set k2 [new_key]
+        r rename $k $k2
+        assert_equal compressed [r object encoding $k2]
+        set k3 [new_key]
+        assert_equal 1 [r renamenx $k2 $k3]
+        assert_equal compressed [r object encoding $k3]
+
+        r select 10
+        r del $k3
+        r select 9
+        assert_equal 1 [r move $k3 10]
+        r select 10
+        assert_equal compressed [r object encoding $k3]
+        assert_equal 1 [r move $k3 9]
+        r select 9
+        assert_equal compressed [r object encoding $k3]
+
+        assert_equal $before [getInfoProperty [r info compression] compression_total_values_decompressed]
+        assert_equal 1 [getInfoProperty [r info compression] compressed_values]
+        assert_equal [compression_value 6] [r get $k3]
+    }
+
+    test {COPY copies the frame and does not decompress} {
+        r flushall
+        set k [new_key]
+        r set $k [compression_value 7] EX 1000
+        compress_key r $k
+        set before [getInfoProperty [r info compression] compression_total_values_decompressed]
+        set k2 [new_key]
+        assert_equal 1 [r copy $k $k2]
+        assert_equal compressed [r object encoding $k]
+        assert_equal compressed [r object encoding $k2]
+        assert_range [r ttl $k2] 900 1000
+        set info [r info compression]
+        assert_equal 2 [getInfoProperty $info compressed_values]
+        assert_equal [expr {2 * [string length [compression_value 7]]}] [getInfoProperty $info compressed_values_original_bytes]
+        assert_equal $before [getInfoProperty $info compression_total_values_decompressed]
+        assert_equal [compression_value 7] [r get $k2]
+        assert_equal [compression_value 7] [r get $k]
+        r del $k $k2
+        assert_equal 0 [getInfoProperty [r info compression] compressed_values]
+        assert_equal 0 [getInfoProperty [r info compression] compressed_values_bytes]
+    }
+
+    test {Overwriting a compressed key with COPY, RENAME, or MOVE updates INFO compression} {
+        r flushall
+        r select 10
+        r flushdb
+        r select 9
+        foreach k {a b c d e} {
+            r set $k [compression_value]
+            compress_key r $k
+        }
+        assert_equal 1 [r copy a b REPLACE]
+        assert_equal OK [r rename c d]
+        r select 10
+        r set e [compression_value 8]
+        compress_key r e
+        r select 9
+        assert_equal 1 [r move e 10 REPLACE]
+        # a, b, d in db 9 and e in db 10.
+        assert_equal 4 [getInfoProperty [r info compression] compressed_values]
+        r select 10
+        assert_equal [compression_value] [r get e]
+        r flushdb
+        r select 9
+        r flushall
+        assert_equal 0 [getInfoProperty [r info compression] compressed_values]
+        assert_equal 0 [getInfoProperty [r info compression] compressed_values_bytes]
+    }
+
+    test {EXPIRE in the past deletes a compressed key} {
+        r flushall
+        r set k [compression_value]
+        compress_key r k
+        r expire k -1
+        assert_equal 0 [r exists k]
+        assert_equal 0 [getInfoProperty [r info compression] compressed_values]
+    }
+
+    test {COPY and EXPIRE during a child process do not change the stored value} {
+        r flushall
+        r set k [compression_value 9]
+        compress_key r k
+        for {set i 0} {$i < 10} {incr i} { r set filler:$i x }
+        r config set rdb-key-save-delay 200000
+        r bgsave
+        wait_for_condition 50 20 {[s rdb_bgsave_in_progress] == 1} else { fail "no child" }
+        set made [getInfoProperty [r info compression] compression_total_temporary_copies_made]
+        assert_equal 1 [r copy k k2]
+        assert_equal 1 [r expire k 1000]
+        assert_equal compressed [r object encoding k]
+        assert_equal compressed [r object encoding k2]
+        assert_equal $made [getInfoProperty [r info compression] compression_total_temporary_copies_made]
+        r config set rdb-key-save-delay 0
+        waitForBgsave r
+        assert_equal [compression_value 9] [r get k2]
+    }
+
     test {Small values are not compressed} {
         set k [new_key]
         set k2 [new_key]

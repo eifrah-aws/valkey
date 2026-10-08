@@ -53,6 +53,13 @@ void compressorSetCompressedValue(robj *o, sds frame) {
     sdsfree(plain);
 }
 
+sds compressorDupFrame(const robj *o) {
+    serverAssert(compressorIsCompressedString(o));
+    sds frame = sdsdup(objectGetVal(o));
+    compressorStatsAddValue(compressorStringObjectLen(o), compressorFrameAllocSize(frame));
+    return frame;
+}
+
 void compressorStringObjectFreed(const robj *o) {
     compressorStatsRemoveValue(compressorStringObjectLen(o), compressorFrameAllocSize(objectGetVal(o)));
 }

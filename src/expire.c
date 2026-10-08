@@ -803,7 +803,8 @@ void expireGenericCommand(client *c, mstime_t basetime, int unit) {
         when = 0;
     }
 
-    robj *obj = lookupKeyWrite(c->db, key);
+    /* The TTL is not part of the value, so a compressed value stays compressed. */
+    robj *obj = lookupKeyWriteWithFlags(c->db, key, LOOKUP_NODECOMPRESS);
 
     /* No key, return zero. */
     if (obj == NULL) {
@@ -948,7 +949,7 @@ void pexpiretimeCommand(client *c) {
 
 /* PERSIST key */
 void persistCommand(client *c) {
-    if (lookupKeyWrite(c->db, c->argv[1])) {
+    if (lookupKeyWriteWithFlags(c->db, c->argv[1], LOOKUP_NODECOMPRESS)) {
         if (removeExpire(c->db, c->argv[1])) {
             signalModifiedKey(c, c->db, c->argv[1]);
             notifyKeyspaceEvent(NOTIFY_GENERIC, "persist", c->argv[1], c->db->id);
@@ -966,7 +967,7 @@ void persistCommand(client *c) {
 void touchCommand(client *c) {
     int touched = 0;
     for (int j = 1; j < c->argc; j++)
-        if (lookupKeyRead(c->db, c->argv[j]) != NULL) touched++;
+        if (lookupKeyReadWithFlags(c->db, c->argv[j], LOOKUP_NODECOMPRESS) != NULL) touched++;
     addReplyLongLong(c, touched);
 }
 

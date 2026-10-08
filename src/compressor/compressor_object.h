@@ -36,6 +36,13 @@ bool compressorIsCompressedString(const struct serverObject *o);
  * plain value. o must be a RAW string, and o takes over frame. */
 void compressorSetCompressedValue(struct serverObject *o, sds frame);
 
+/* Returns a copy of the frame of the compressed string o, and adds the copy to
+ * INFO compression. The caller stores it in a new compressed string object.
+ * Used by COPY, so the copy is not decompressed and compressed again. The new
+ * object gets new LRU/LFU data, so the copy starts hot, like a COPY of a plain
+ * value. compressorCreatePlainCopy() is different: it keeps the LRU/LFU data. */
+sds compressorDupFrame(const struct serverObject *o);
+
 /* Updates INFO compression before a compressed string o is freed. Can run on
  * a background thread (FLUSHALL ASYNC). */
 void compressorStringObjectFreed(const struct serverObject *o);
