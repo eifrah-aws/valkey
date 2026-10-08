@@ -1,8 +1,11 @@
 # Tests for compressed string values: the background sweeper compresses cold
 # values, and a read decompresses them.
 #
-# Most servers here use allkeys-lfu. A new key starts with an LFU counter that
-# counts as cold, so the sweeper picks it at once. A read makes it hot.
+# Most servers here use allkeys-lfu. A new key is hot for up to a minute, so
+# the tests use make_cold (RESTORE FREQ 4) to make a key cold at once. A read
+# or a write makes it hot again.
+
+source tests/support/compression.tcl
 
 # A JSON-like value of about 1 KiB. It compresses well.
 proc compression_value {{seed 0}} {
@@ -13,27 +16,17 @@ proc compression_value {{seed 0}} {
     return $v
 }
 
-# Returns a key name that was never used. A key that was read or written is
-# hot, so the sweeper does not pick it again soon. Each check needs a new key.
+# Returns a key name that was never used. Each check needs a new key.
 proc new_key {} {
     incr ::compression_key_id
     return "key:$::compression_key_id"
-}
-
-# Waits until the sweeper compressed key.
-proc wait_compressed {r key} {
-    wait_for_condition 100 50 {
-        [$r object encoding $key] eq "compressed"
-    } else {
-        fail "$key was not compressed"
-    }
 }
 
 # Sets a witness key and waits until it is compressed. After this, the sweeper
 # had a chance to look at the other keys too.
 proc wait_for_sweep {r} {
     $r set __witness [compression_value 99]
-    wait_compressed $r __witness
+    compress_key $r __witness
     $r del __witness
 }
 
@@ -48,14 +41,23 @@ start_server {tags {"compression external:skip"} overrides {maxmemory-policy all
 start_server {tags {"compression external:skip"} overrides {compression-mode lz4 maxmemory-policy allkeys-lfu}} {
     test {The sweeper compresses a cold value} {
         r set k [compression_value]
-        wait_compressed r k
+        compress_key r k
         assert_equal [compression_value] [r get k]
+    }
+
+    test {With LFU, a new key stays plain until it is cold} {
+        set k [new_key]
+        r set $k [compression_value]
+        assert_equal 5 [r object freq $k]
+        wait_for_sweep r
+        assert_equal raw [r object encoding $k]
+        compress_key r $k
     }
 
     test {A compressed value uses less memory} {
         set k [new_key]
         r set $k [compression_value]
-        wait_compressed r $k
+        compress_key r $k
         set compressed_usage [r memory usage $k]
         r get $k
         assert_equal raw [r object encoding $k]
@@ -66,7 +68,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         set k [new_key]
         set v [compression_value 7]
         r set $k $v
-        wait_compressed r $k
+        compress_key r $k
         assert_equal $v [r get $k]
         wait_for_sweep r
         assert_equal raw [r object encoding $k]
@@ -76,7 +78,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
     test {OBJECT and MEMORY USAGE do not decompress} {
         set k [new_key]
         r set $k [compression_value]
-        wait_compressed r $k
+        compress_key r $k
         r object refcount $k
         r object freq $k
         r memory usage $k
@@ -88,6 +90,8 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         set k2 [new_key]
         r set $k [string repeat a 100]
         r set $k2 [string repeat a 200]
+        make_cold r $k
+        make_cold r $k2
         wait_for_sweep r
         assert_not_equal compressed [r object encoding $k]
         assert_not_equal compressed [r object encoding $k2]
@@ -97,6 +101,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         set k [new_key]
         r config set compression-max-value-size 1500
         r set $k [string repeat [compression_value] 2]
+        make_cold r $k
         wait_for_sweep r
         assert_equal raw [r object encoding $k]
         r config set compression-max-value-size 131072
@@ -105,6 +110,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
     test {Values that do not compress stay plain} {
         set k [new_key]
         r set $k [randstring 2000 2000 binary]
+        make_cold r $k
         wait_for_sweep r
         assert_equal raw [r object encoding $k]
     }
@@ -112,7 +118,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
     test {The TTL stays when a value is compressed} {
         set k [new_key]
         r set $k [compression_value] EX 1000
-        wait_compressed r $k
+        compress_key r $k
         assert_range [r ttl $k] 900 1000
     }
 
@@ -127,20 +133,20 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         ] {
             set k [new_key]
             r set $k $v
-            wait_compressed r $k
+            compress_key r $k
             set args [lrange $cmd 1 end]
             assert_equal $expected [r [lindex $cmd 0] $k {*}$args]
         }
 
         set k [new_key]
         r set $k $v
-        wait_compressed r $k
+        compress_key r $k
         r append $k "tail"
         assert_equal "${v}tail" [r get $k]
 
         set k [new_key]
         r set $k $v
-        wait_compressed r $k
+        compress_key r $k
         r setrange $k 0 "XX"
         assert_equal "XX[string range $v 2 end]" [r get $k]
     }
@@ -150,13 +156,13 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         set b [new_key]
         r set $a [compression_value 1]
         r set $b [compression_value 2]
-        wait_compressed r $a
-        wait_compressed r $b
+        compress_key r $a
+        compress_key r $b
         assert_equal [list [compression_value 1] [compression_value 2]] [r mget $a $b]
 
         set a [new_key]
         r set $a [compression_value 1]
-        wait_compressed r $a
+        compress_key r $a
         r multi
         r get $a
         r append $a "x"
@@ -168,7 +174,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
     test {A write makes the key hot, so it stays plain} {
         set k [new_key]
         r set $k [compression_value 1]
-        wait_compressed r $k
+        compress_key r $k
         r set $k [compression_value 2]
         wait_for_sweep r
         assert_equal raw [r object encoding $k]
@@ -183,6 +189,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         r bgsave
         set k [new_key]
         r set $k [compression_value]
+        make_cold r $k
         after 1000
         assert_equal 1 [s rdb_bgsave_in_progress]
         assert_equal raw [r object encoding $k]
@@ -199,7 +206,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         r set $a [compression_value 1]
         r set $b [compression_value 2]
         r set $t [compression_value 3] EX 1000
-        foreach k [list $a $b $t] { wait_compressed r $k }
+        foreach k [list $a $b $t] { compress_key r $k }
         for {set i 0} {$i < 10} {incr i} { r set filler:$i x }
         r config set rdb-key-save-delay 200000
         r bgsave
@@ -230,7 +237,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
     test {DEBUG DIGEST is the same for compressed and plain values} {
         r flushall
         r set k [compression_value]
-        wait_compressed r k
+        compress_key r k
         set digest [debug_digest]
         r get k
         assert_equal raw [r object encoding k]
@@ -240,7 +247,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
     test {DEBUG RELOAD keeps compressed values} {
         r flushall
         r set k [compression_value]
-        wait_compressed r k
+        compress_key r k
         r debug reload
         assert_equal [compression_value] [r get k]
     } {} {needs:debug}
@@ -251,7 +258,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         r config set aof-use-rdb-preamble no
         waitForBgrewriteaof r
         r set k [compression_value]
-        wait_compressed r k
+        compress_key r k
         r bgrewriteaof
         waitForBgrewriteaof r
         r debug loadaof
@@ -266,13 +273,13 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
             $primary flushall
             # Full sync.
             $primary set before [compression_value 1]
-            wait_compressed $primary before
+            compress_key $primary before
             $replica replicaof [srv -1 host] [srv -1 port]
             wait_for_sync $replica
             # Replication stream.
             $primary set after [compression_value 2]
             wait_for_ofs_sync $primary $replica
-            wait_compressed $primary after
+            compress_key $primary after
             assert_equal [compression_value 1] [$replica get before]
             assert_equal [compression_value 2] [$replica get after]
             assert_equal raw [$replica object encoding after]
@@ -295,7 +302,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
             $primary set k6 [compression_value 6] EX 1000 GET
             wait_for_ofs_sync $primary $replica
             for {set i 1} {$i <= 6} {incr i} {
-                wait_compressed $primary k$i
+                compress_key $primary k$i
                 assert_equal [compression_value $i] [$replica get k$i]
                 assert_range [$replica ttl k$i] 900 1000
             }

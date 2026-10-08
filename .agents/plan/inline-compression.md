@@ -28,6 +28,7 @@ All commits below are pushed to `origin/valkey-inline-compression` (the
 | Design doc moved to `design-docs/` and aligned | DONE, pushed | `f28ce0cb1` |
 | Fix the Linux build (`pthread_setname_np`) | DONE, pushed | `dd894985d` |
 | INFO compression (part of Phase 5) | DONE, pushed | `14df64e73` |
+| LFU threshold 4, `compression-max-inflight-requests` setting | DONE | this commit |
 | 5 - Background sweeper | PARTLY DONE (see Phase 5) | `eba2a8ffd`, `14df64e73` |
 | 3b - Other read paths | NEXT | - |
 | 4 to 11 | TODO | - |
@@ -149,7 +150,10 @@ Configs exist and are checked. Nothing compresses yet.
 - New `src/compressor/compressor_config.{h,c}`:
   - The limits and defaults of the settings.
   - The fixed v1 values of the "advanced (v2)" settings
-    (`COMPRESSOR_MAX_INFLIGHT_REQUESTS`, `COMPRESSOR_MIN_SAVINGS_PCT`, ...).
+    (`COMPRESSOR_MIN_SAVINGS_PCT`, `COMPRESSOR_LFU_THRESHOLD`, ...).
+  - Later: `compression-max-inflight-requests` (1-10000, default 100,
+    can change at runtime) took the place of the fixed
+    `COMPRESSOR_MAX_INFLIGHT_REQUESTS`.
   - `compressorConfigCheck()`: min value size must not be greater than max,
     and (since 3a) `compression-mode` can not be used with
     `forkless-infrastructure-enabled yes`. It runs at startup (in
@@ -199,12 +203,15 @@ we can run benchmarks. This also does most of Phase 5.
     `compression-threads` workers. Each has its own `compressorAlg`. Jobs go
     through two `mutexQueue`s.
   - `compressorCron()` in `serverCron()`: samples up to
-    `COMPRESSOR_MAX_INFLIGHT_REQUESTS` keys (db picked by key count, then
+    `COMPRESSOR_SAMPLES_PER_CRON` (100) keys (db picked by key count, then
     `kvstoreGetFairRandomHashtableIndex()` and
     `kvstoreHashtableSampleEntries()`). Takes RAW strings with refcount 1, in
-    the size range, and cold: LFU count at most `COMPRESSOR_LFU_THRESHOLD`,
-    or idle at least `COMPRESSOR_MIN_IDLE_SECONDS`. Copies the bytes and
-    queues a job. Stops at `COMPRESSOR_MAX_INFLIGHT_REQUESTS` jobs in flight.
+    the size range, and cold: LFU count at most `COMPRESSOR_LFU_THRESHOLD`
+    (4; a new key starts at 5, so it is hot until it decays), or idle at
+    least `COMPRESSOR_MIN_IDLE_SECONDS`. Copies the bytes and queues a job.
+    Stops at `compression-max-inflight-requests` jobs in flight.
+  - Tests make a key cold at once with `make_cold` in
+    `tests/support/compression.tcl` (`RESTORE ... REPLACE FREQ 4`).
   - An in-flight set (`inflight_keys`, by db id and key) keeps a key out of
     two jobs at once.
   - The worker builds the frame and drops it if it is not smaller.
@@ -506,114 +513,170 @@ Let the I/O thread unpack the value, not the main thread.
 The I/O threads are the threads that send the answer to the client. There
 are many of them. They have free time. The main thread has no free time.
 
-Today, when a `GET` returns a big value, the main thread does not copy the
-value. It writes a small note in the answer buffer. The note says: "send the
-bytes of this object". The I/O thread reads the note and sends the bytes.
-This note is called `bulkStrRef` in `src/networking.c`.
+The main thread copies the compressed bytes (the frame) into the answer
+buffer, as they are. It marks this part of the answer as "compressed". The
+I/O thread sees the mark, unpacks the bytes, and sends the plain value.
 
-Every note in the answer buffer has a small header with a type. Today there
-are two types:
+The frame is small. For a 2 KB JSON value it is about 500 bytes. Copying it
+takes about 50 nanoseconds. Unpacking it takes about 1.5 microseconds. So the
+main thread does 30 times less work.
+
+### How the answer buffer works today
+
+The answer buffer is a list of parts. Each part starts with a small header,
+`payloadHeader` in `src/networking.c`. The header has:
+
+- `payload_type`: what kind of part this is.
+- `payload_len`: how many bytes the part has in the buffer.
+- `reply_len`: how many bytes go to the network. Today this is used when the
+  two numbers are different.
+
+Today there are two kinds of parts:
 
 - `PLAIN_REPLY`: normal bytes. Send them as they are.
-- `BULK_STR_REF`: a note. Send the bytes of the object in the note.
+- `BULK_STR_REF`: a note with a pointer to an object. Send the bytes of that
+  object. The answer holds the object until it is sent.
 
-We add a third type:
+We add a third kind:
 
-- `COMPRESSED_STR_REF`: a note. The object holds a compressed value. Unpack
-  it first, then send the plain bytes.
+- `COMPRESSED_REPLY`: the bytes are a frame. Unpack them, then send the plain
+  bytes.
 
 ### How it works, step by step
 
 1. A client sends `GET key`. The value is compressed.
-2. The main thread does not unpack the value. It writes a `COMPRESSED_STR_REF`
-   note with a pointer to the object. It also adds 1 to the object's
-   reference count, so the object stays alive until the answer is sent.
-   This is what `BULK_STR_REF` does today too.
-3. The I/O thread reads the note. It sees the type `COMPRESSED_STR_REF`.
-4. The I/O thread reads the first 10 bytes of the compressed value (the frame
-   header). The header holds the plain size. So the I/O thread can write
-   `$<size>\r\n` with no unpacking.
-5. The I/O thread unpacks the value into its own buffer. Each I/O thread has
+2. The main thread does not unpack the value. It copies the frame into the
+   answer buffer as a `COMPRESSED_REPLY` part. It reads the plain size from
+   the first 10 bytes of the frame (the frame header) and writes it into
+   `reply_len`, together with the size of `$<size>\r\n` and `\r\n`.
+3. The main thread is done with this key. It does not hold the object.
+4. The I/O thread reads the part. It sees the kind `COMPRESSED_REPLY`.
+5. The I/O thread reads the frame header and writes `$<size>\r\n`.
+6. The I/O thread unpacks the frame into its own buffer. Each I/O thread has
    its own buffer and its own LZ4 unpacker. They do not share anything.
-6. The I/O thread sends the plain bytes and `\r\n`.
-7. When the answer is sent, the main thread takes 1 from the reference count,
-   as today.
+7. The I/O thread sends the plain bytes and `\r\n`.
 
-The main thread does almost no work for the value. The value in the database
-stays compressed. The memory saving stays.
+The value in the database stays compressed. The memory saving stays.
 
-### How the I/O thread knows the value is compressed
+### Why this is simple and safe
 
-Only from the type in the note. The main thread checks the object encoding
-and picks the type. The I/O thread does not look at the object encoding. It
-never touches the database. This is the same rule as today: I/O threads
-only read what the main thread puts in the answer buffer.
+The answer does not point to the object. It has its own copy of the frame.
+So nothing in the database needs to wait for the answer:
 
-### Why it is safe to read the compressed value from the I/O thread
+- A write can unpack the value in place, as today.
+- `SET` can replace the value. `DEL` and expire can free it.
+- The sweeper and defrag work as today.
+- `FLUSHALL ASYNC` needs no care.
 
-A compressed value can change in two ways: a write unpacks it in the
-database, or the key is deleted. Both happen on the main thread. Both must
-wait until no one else holds the object. The answer holds the object (the
-reference count is above 1). So the compressed bytes do not change until the
-answer is sent.
+The I/O thread only reads its own copy. It never looks at the database.
 
-One thing must change for this. Today a write (`LOOKUP_WRITE`) unpacks the
-value in place, even when the reference count is above 1. With this plan,
-that is not safe: the I/O thread may still read the old bytes. The rule
-becomes: if the reference count is above 1, make a new plain object and put
-it in the database. Do not change the shared one. `dbUnshareStringValue()`
-already does this kind of copy for other cases.
+### Pieces that already exist
 
-### Hot keys: unpack in the background after the first read
+- `upsertPayloadHeader()` has a rule for `BULK_STR_REF`: a note is never cut
+  in two parts (`min_len = len`). We use the same rule for
+  `COMPRESSED_REPLY`: a frame always sits in one part. If it does not fit in
+  the client buffer `c->buf`, it goes to the answer list as its own node,
+  like `_addBulkStrRefToBufferOrList()` does. A frame is at most 128 KB, so
+  it always fits in a list node.
+- `_addBulkStrRefToBuffer()` turns an empty buffer into a buffer with
+  headers (`c->flag.buf_encoded = 1`). We do the same. If the buffer has
+  plain bytes already, the frame goes to the list.
+- In `_addReplyPayloadToList()`, the line
+  `int encoded = payload_type == BULK_STR_REF || ...` becomes
+  `payload_type != PLAIN_REPLY || ...`.
+- The code that tracks `reply_len` (around `networking.c:3313`) already
+  knows that some parts have a different size on the network. For our part,
+  `reply_len` is set when the part is added, so that code only reads it.
+- Short writes: `reply->last_written_len` says how many network bytes of the
+  current part are already sent. For a compressed part, the I/O thread
+  unpacks again and skips that many plain bytes. Unpacking twice is cheap,
+  and the I/O thread keeps no state between writes.
 
-If a key is read many times, we do not want to unpack it on every read. We
-want it plain in the database, like today.
+### Where it applies
 
-So after the first read, the main thread also gives a small job to a worker
-thread: "unpack this key". The worker gets a copy of the compressed bytes
-(small, about 500 bytes for a 2 KB JSON value). It unpacks them. Then
-`compressorBeforeSleep()` puts the plain value in the database, but only if
-the key still holds the same compressed bytes. This is the same check that
-`installJob()` does today, in the other direction.
+Only when all of these are true:
 
-The second read finds a plain value. No unpacking anywhere.
+- The client is a real network client: not a Lua script, not `RM_Call`, not
+  AOF load, not a replica. Those clients read the buffer as RESP text and
+  must never see a frame. The same check exists today for `BULK_STR_REF`
+  (`isCopyAvoidPreferred()` without the object checks).
+- The answer is not deferred.
+- There is more than one I/O thread (`io_threads_num > 1`). With no I/O
+  threads, the unpacking happens in `writeToClient()` on the main thread, so
+  there is no gain.
 
-We need a rule for when to give this job. Not every read. For example: on
-the second read, or when the LFU counter goes above
-`COMPRESSOR_LFU_THRESHOLD`. The sweeper already uses the same test the other
-way.
+Do not use the size limits of `BULK_STR_REF` (16 KB, 64 KB, 7 threads). The
+goal here is less CPU on the main thread, not less copying. A frame of any
+size qualifies.
 
-### Limits
+Only `GET` and `MGET` use this. They return the whole value as one bulk
+string. Every other command (`GETRANGE`, `APPEND`, `INCR`, `LCS`, bit
+commands, ...) reads the bytes on the main thread, so it goes through
+`lookupKey()` and unpacks in place, as today.
 
-- Without I/O threads, the unpacking happens in `writeToClient()`, on the
-  main thread. No gain, no loss.
-- The I/O thread needs a buffer for the plain bytes. The bytes must live
-  until `writev()` is done. One buffer per I/O thread, reused for each write
-  call, is enough. If a write is cut in two (short write), the I/O thread
-  unpacks again on the next write. This is simple and cheap.
-- Only `GET` and commands that return the whole value as one bulk string.
-  Commands that read the bytes (`GETRANGE`, `STRLEN` is fine, `APPEND`,
-  `INCR`, ...) still unpack on the main thread, as today.
+When the check fails, `GET` falls back to today's path:
+`compressorLookupValue()`, then `addReplyBulk()`.
+
+### Hot keys
+
+With this plan, a key that is read 1000 times stays compressed, and the I/O
+threads unpack it 1000 times. For CPU this is fine. But the design wants hot
+keys plain in the database.
+
+Simple rule in `GET`: if the key is hot (LFU counter above
+`COMPRESSOR_LFU_THRESHOLD`, or idle time below
+`COMPRESSOR_MIN_IDLE_SECONDS`), unpack in place on the main thread, as
+today. If the key is cold, send the compressed part.
+
+The first read of a cold key is the one that hurts in the test above. With
+this rule, that read costs about 50 nanoseconds. If a second read comes soon,
+the key is hot now. That read pays 1.5 microseconds one time, and the key is
+plain from then on. No worker job is needed.
+
+### Open points
+
+1. **Dictionaries (Phase 6 and 7).** The I/O thread needs the dictionary
+   that the frame header names (`dict_id`). The answer does not hold the
+   object, so nothing keeps the dictionary alive while the part waits in the
+   buffer. Two options: count the waiting parts per `dict_id` on the main
+   thread (add one when the part is written, take one away in the
+   write-done handler, which already runs on the main thread for
+   `BULK_STR_REF`), or do not retire a dictionary while any client has
+   output waiting. Not a problem for LZ4 without a dictionary in v1.
+2. **I/O thread state.** One `compressorAlg` and one buffer per I/O thread,
+   made in `io_threads.c` when the thread starts. The buffer must hold up to
+   128 KB.
+3. **Numbers that use the plain size.** `addReplyBulk()` checks
+   `encoding == OBJ_ENCODING_RAW` and uses `sdslen()` for
+   `net_output_bytes_curr_cmd`. Both must use the plain size from the frame
+   header. Cluster slot `network-bytes-out` reads `reply_len`, so it is
+   right already.
+4. **Memory per client.** A slow client with many waiting `GET` answers
+   holds frames, not plain copies. `client-output-buffer-limit` counts buffer
+   memory, so it sees the compressed size. `reply_len` holds the network
+   size. A slow client can queue more answers than before. Probably fine.
+   Write it in the docs.
 
 ### Work list
 
-- `src/networking.c`: new type `COMPRESSED_STR_REF`. New function like
-  `_addBulkStrRefToBufferOrList()` for compressed objects. In
-  `addEncodedBufferToReplyIOV()`, handle the new type: read the plain size
-  from the frame header, unpack into the thread's buffer, add to `iov`.
+- `src/networking.c`: `COMPRESSED_REPLY` in `payloadType`. New function
+  `_addCompressedReplyToBufferOrList(c, frame, plain_len)`. The `min_len`
+  rule and the `encoded` rule for the new kind. In
+  `addEncodedBufferToReplyIOV()`: read the plain size from the frame header,
+  write the prefix, unpack into the thread's buffer, add to `iov`.
 - `src/io_threads.c`: one unpacker and one buffer per I/O thread.
-- `src/compressor/compressor_object.c`: a write on a shared compressed object
-  makes a new plain object instead of changing the shared one.
-- `src/compressor/compressor_workers.c`: a second job type, "unpack this
-  key", and the install step in `compressorBeforeSleep()`.
-- `src/db.c` / `compressorLookupValue()`: the rule for when to queue the
-  unpack job.
-- `INFO compression`: count answers sent from a compressed value, and unpack
-  jobs queued, installed, and dropped.
-- Tests: Tcl test with I/O threads on and off. `GET` on a compressed key
-  returns the right bytes. The key stays compressed after one read. The key
-  is plain after the second read. A write during a pending unpack job is not
-  lost. Unit test for the new reply type in `src/unit/test_networking.cpp`.
+- `src/t_string.c`: `getGenericCommand()` and `mgetCommand()` use
+  `LOOKUP_NODECOMPRESS`. Then they pick: hot key or no I/O threads or not a
+  network client → `compressorLookupValue()` + `addReplyBulk()`; cold key →
+  compressed part.
+- `INFO compression`: count answers sent from a frame, and the unpack time
+  on the I/O threads.
+- Tests: Tcl tests with I/O threads on and off. `GET` and `MGET` on a
+  compressed key return the right bytes. The key stays compressed after a
+  `GET`. A frame that does not fit in `c->buf` goes to the list. A short
+  write (small socket buffer or `DEBUG`) sends the right bytes. Lua and
+  `RM_Call` get plain bytes. Unit test for the new part kind in
+  `src/unit/test_networking.cpp`.
 
 ---
 

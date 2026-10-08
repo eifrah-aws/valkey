@@ -1,5 +1,7 @@
 # Tests for INFO compression. See design-docs/inline-compression.md, 9.1.
 
+source tests/support/compression.tcl
+
 proc cinfo {field} {
     getInfoProperty [r info compression] $field
 }
@@ -11,10 +13,6 @@ proc cinfo_value {{seed 0}} {
         append v "{\"user_id\":[expr {$seed + $i}],\"role\":\"member\",\"active\":true},"
     }
     return $v
-}
-
-proc cinfo_wait_compressed {key} {
-    wait_for_condition 100 50 {[r object encoding $key] eq "compressed"} else { fail "$key was not compressed" }
 }
 
 # The counters must always add up, see 9.1. All fields come from one INFO
@@ -66,7 +64,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         # Stored as raw (too long for embstr), but under the 256-byte minimum.
         r set small [string repeat x 250]
         assert_equal raw [r object encoding small]
-        foreach k {a b c} { cinfo_wait_compressed $k }
+        foreach k {a b c} { compress_key r $k }
 
         assert_equal 3 [cinfo compressed_values]
         assert_equal $total [cinfo compressed_values_original_bytes]
@@ -101,6 +99,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
 
     test {INFO compression counts values that do not compress} {
         r set random [randstring 2000 2000 binary]
+        make_cold r random
         wait_for_condition 100 50 {[cinfo values_compressed_and_dropped_low_saving] > 0} else {
             fail "the random value was not dropped"
         }
@@ -111,7 +110,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
     test {INFO compression counts temporary copies during a save} {
         r flushall
         r set k [cinfo_value]
-        cinfo_wait_compressed k
+        compress_key r k
         for {set i 0} {$i < 10} {incr i} { r set filler:$i x }
         set made [cinfo temporary_copies_made]
         r config set rdb-key-save-delay 200000
@@ -144,7 +143,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
     test {INFO compression sizes go to 0 after FLUSHALL ASYNC} {
         r flushall
         foreach k {x y z} { r set $k [cinfo_value] }
-        foreach k {x y z} { cinfo_wait_compressed $k }
+        foreach k {x y z} { compress_key r $k }
         r flushall async
         wait_for_condition 100 50 {[cinfo compressed_values] == 0} else { fail "the sizes did not go to 0" }
         assert_equal 0 [cinfo compressed_values_original_bytes]

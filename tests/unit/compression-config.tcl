@@ -1,5 +1,7 @@
 # Tests for the inline compression settings.
 
+source tests/support/compression.tcl
+
 # Starts the server with the given arguments and returns its output. Use it only
 # with settings that make the start fail, because the server exits at once.
 proc compression_start_fails {args} {
@@ -14,6 +16,7 @@ start_server {tags {"compression external:skip"}} {
         assert_equal {compression-min-value-size 256} [r config get compression-min-value-size]
         assert_equal {compression-max-value-size 131072} [r config get compression-max-value-size]
         assert_equal {compression-dict-size 102400} [r config get compression-dict-size]
+        assert_equal {compression-max-inflight-requests 100} [r config get compression-max-inflight-requests]
     }
 
     test {Startup-only compression settings can not be changed} {
@@ -39,6 +42,16 @@ start_server {tags {"compression external:skip"}} {
         assert_equal {compression-max-value-size 131072} [r config get compression-max-value-size]
     }
 
+    test {compression-max-inflight-requests can be changed at runtime and has limits} {
+        r config set compression-max-inflight-requests 1
+        assert_equal {compression-max-inflight-requests 1} [r config get compression-max-inflight-requests]
+        r config set compression-max-inflight-requests 10000
+        assert_error "*must be between 1 and 10000*" {r config set compression-max-inflight-requests 0}
+        assert_error "*must be between 1 and 10000*" {r config set compression-max-inflight-requests 10001}
+        assert_equal {compression-max-inflight-requests 10000} [r config get compression-max-inflight-requests]
+        r config set compression-max-inflight-requests 100
+    }
+
     test {Compression min value size can not be greater than max} {
         assert_error "*compression-min-value-size can't be greater than compression-max-value-size*" {
             r config set compression-min-value-size 4096 compression-max-value-size 1024
@@ -60,6 +73,18 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
     }
 }
 
+start_server {tags {"compression external:skip"} overrides {compression-mode lz4 compression-max-inflight-requests 1 maxmemory-policy allkeys-lfu}} {
+    test {Values are compressed with one job in flight} {
+        set v [string repeat {{"user_id":3,"role":"member"},} 40]
+        foreach k {a b c} {
+            r set $k $v
+            make_cold r $k
+        }
+        foreach k {a b c} { wait_compressed r $k }
+        assert_equal $v [r get a]
+    }
+}
+
 tags {"compression external:skip"} {
     test {Bad compression settings stop the server at startup} {
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-mode zstd]
@@ -68,6 +93,7 @@ tags {"compression external:skip"} {
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-threads 17]
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-max-value-size 131073]
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-dict-size 100]
+        assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-max-inflight-requests 0]
         assert_match "*compression-min-value-size can't be greater than compression-max-value-size*" \
             [compression_start_fails --compression-min-value-size 2048 --compression-max-value-size 1024]
     }

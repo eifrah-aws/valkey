@@ -32,14 +32,22 @@
 #define COMPRESSOR_DICT_SIZE_MAX (1024 * 1024)
 #define COMPRESSOR_DICT_SIZE_DEFAULT (100 * 1024)
 
+/* compression-max-inflight-requests: the most compression jobs at the same
+ * time. A job counts from the moment it is queued until the main thread
+ * installs or drops the result. When the limit is reached, the sweeper does
+ * not pick new values. Each job holds a copy of the plain value, so with
+ * values of at most 128 KiB, the default keeps the copies under 12.5 MiB. */
+#define COMPRESSOR_MAX_INFLIGHT_REQUESTS_MIN 1
+#define COMPRESSOR_MAX_INFLIGHT_REQUESTS_MAX 10000
+#define COMPRESSOR_MAX_INFLIGHT_REQUESTS_DEFAULT 100
+
 /* Fixed values. Users can not change these in v1. A later version may turn
  * them into settings. */
 
-/* The most compression jobs at the same time. A job counts from the moment it
- * is queued until the main thread installs or drops the result. When the limit
- * is reached, the sweeper does not pick new values. With values of at most
- * 128 KiB, this keeps the copied input under 12.5 MiB. */
-#define COMPRESSOR_MAX_INFLIGHT_REQUESTS 100
+/* The most keys the sweeper looks at in one compressorCron() call. This keeps
+ * the work on the main thread small, also when
+ * compression-max-inflight-requests is large. */
+#define COMPRESSOR_SAMPLES_PER_CRON 100
 
 /* The net-savings guard. A compressed value is kept only when its memory is at
  * least this many percent smaller than the memory of the plain value. If not,
@@ -57,8 +65,10 @@
 #define COMPRESSOR_HOT_KEYS_MAX 100000
 
 /* A value is cold when its LFU counter is at most this number. This test is
- * used with LFU eviction, in place of COMPRESSOR_MIN_IDLE_SECONDS. */
-#define COMPRESSOR_LFU_THRESHOLD 5
+ * used with LFU eviction, in place of COMPRESSOR_MIN_IDLE_SECONDS. A new key
+ * starts at 5 (LFU_INIT_VAL), so it is hot until the counter decays to 4. With
+ * the default lfu-decay-time of 1, this takes at most one minute. */
+#define COMPRESSOR_LFU_THRESHOLD 4
 
 /* The first dictionary is trained when the keyspace has this many keys. A
  * training also needs at least this many sample values. */

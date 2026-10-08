@@ -152,13 +152,13 @@ Retraining is triggered by drift: when the live compression ratio gets clearly w
 
 On each `compressionCron()` call, the sweeper first checks `compression-max-inflight-requests`. An in-flight request remains counted from enqueue until the main thread installs or discards its result, including queued, running, and completed-but-not-drained jobs. If the in-flight count has reached `compression-max-inflight-requests`, 100 by default, the sweeper does not sample.
 
-When capacity exists, the sampling budget per cron call is `compression-max-inflight-requests` returned entries, 100 by default. It is not controlled by another setting. The sweeper chooses a non-empty database with probability proportional to its key count, selects one of that database's hashtables with `kvstoreGetFairRandomHashtableIndex()`, and calls `kvstoreHashtableSampleEntries()` for up to the remaining budget. If the selected hashtable has fewer entries, it repeats the database and hashtable selection until the budget is exhausted or the in-flight request cap is reached. The kvstore helper excludes importing hashtables.
+When capacity exists, the sampling budget per cron call is `COMPRESSOR_SAMPLES_PER_CRON`, 100 returned entries. It is a fixed value, not a setting, so a large `compression-max-inflight-requests` does not add work to one cron call. The sweeper chooses a non-empty database with probability proportional to its key count, selects one of that database's hashtables with `kvstoreGetFairRandomHashtableIndex()`, and calls `kvstoreHashtableSampleEntries()` for up to the remaining budget. If the selected hashtable has fewer entries, it repeats the database and hashtable selection until the budget is exhausted or the in-flight request cap is reached. The kvstore helper excludes importing hashtables.
 
 `kvstoreHashtableSampleEntries()` returns no more entries than requested and does not return the same entry twice within one call. Samples can repeat across cron calls, and no cursor or completed-pass state is kept. Selection is therefore probabilistic rather than an eventual-coverage guarantee. `INFO compression` reports sampled entries and eligibility rejection reasons so operators can measure repeated work and convergence as the share of compressed values rises.
 
 The sweeper reads each sampled database entry directly. Sampling must not perform a normal key lookup, refresh LRU/LFU metadata, or add the key to the hot-key LRU. Candidate discovery is not a client access.
 
-A sampled value is cold according to the access metadata selected by the maxmemory policy. In LFU mode, the sweeper applies normal LFU decay and accepts a frequency at or below `compression-lfu-threshold`, 5 by default. In LRU and `noeviction` modes, it accepts an idle time at or above `compression-min-idle-seconds`, 60 seconds by default. The object's 24-bit field stores one of these forms, so the sweeper never applies both tests.
+A sampled value is cold according to the access metadata selected by the maxmemory policy. In LFU mode, the sweeper applies normal LFU decay and accepts a frequency at or below `compression-lfu-threshold`, 4 by default. A new key starts at 5 (`LFU_INIT_VAL`), so it is hot after it is written. With the default `lfu-decay-time` of 1, the counter decays to 4 within one minute, like the 60-second idle test in LRU mode. With `lfu-decay-time 0`, the counter never decays, and a new key is never compressed. In LRU and `noeviction` modes, it accepts an idle time at or above `compression-min-idle-seconds`, 60 seconds by default. The object's 24-bit field stores one of these forms, so the sweeper never applies both tests.
 
 After the coldness test, the sweeper takes a value only if a compression backend is active and the value is `OBJ_STRING`, `OBJ_ENCODING_RAW`, sole-owner (`refcount == 1`), within the size limits, and absent from the internal hot-key LRU (§7.3). The hot-key LRU is an independent first-line exclusion: it blocks recently read keys before object metadata is evaluated, while the policy-specific coldness gate remains a fallback if that bounded LRU evicts an entry. Compressing a hot key would waste worker CPU and make its next read pay synchronous decompression again.
 
@@ -190,7 +190,7 @@ Two rules keep this honest. The list does **not** need to be complete: the net-s
 
 **Pause during a child process.** While a child process runs (`BGSAVE`, `BGREWRITEAOF`), the sweeper does not queue new jobs and does not install finished frames. An install frees the plain value and writes a new buffer, so it changes memory that the child still shares, and the kernel must copy those pages. Finished jobs wait in the queue until the child ends. The byte compare at install (§6.3) catches any change made in the meantime. A client read during a child does not decompress the stored value either (§7.2). It gets a temporary plain copy with the same key, TTL, and LRU/LFU data, and the stored frame does not change. Without this, a client that reads many compressed keys during a save could make the kernel copy a large part of the dataset. The copy is released when the outermost command ends (`server.execution_nesting` is 0). If the reply holds the copy, it keeps its own reference until the reply is sent. A write during a child still decompresses the stored value in place, because the command changes the key anyway. One small cost: `PFCOUNT` writes its cached count into the copy, so the cache in the stored value is not updated during a child. Modules follow a stricter rule, with or without a child: a module key handle opened for reading always gets its own plain copy, and the stored frame does not change. The handle owns the copy and frees it when it is closed. A module that scans the keyspace therefore does not decompress all of it. A module key handle opened for writing decompresses the stored value in place.
 
-The sweeper does not use a wall-clock or CPU-percentage budget. Candidate work per cron call is bounded by `compression-max-inflight-requests`, 100 returned entries by default. At the default and `server.hz = 10`, it evaluates at most 1,000 sampled entries per second, and less when the request cap is full.
+The sweeper does not use a wall-clock or CPU-percentage budget. Candidate work per cron call is bounded by `COMPRESSOR_SAMPLES_PER_CRON`, 100 returned entries. At the default and `server.hz = 10`, it evaluates at most 1,000 sampled entries per second, and less when the request cap is full.
 
 For each eligible value, the main thread reserves one in-flight request slot before copying and enqueueing it. The reservation is released only after the main thread installs or discards the result. This keeps queued, running, and completed-but-not-drained work within `compression-max-inflight-requests`, 100 by default.
 
@@ -376,7 +376,7 @@ The second backend (LZ4) is operator-selectable at startup, because `compression
 
 All names are ordinary `CONFIG GET` / `CONFIG SET` settings, except `compression-mode`, `compression-threads`, and `compression-dict-size` — those three are read once at startup, like Valkey's `*_cpulist` settings, and `CONFIG SET` against them is rejected. Background compression is off unless `compression-mode` is set at boot. Decoder support remains available for compressed frames restored from RDB even when the mode is `off`.
 
-**Five primary settings**
+**Six primary settings**
 
 | Name | Values | Default | What it does | Change at runtime |
 |---|---|---|---|---|
@@ -385,6 +385,7 @@ All names are ordinary `CONFIG GET` / `CONFIG SET` settings, except `compression
 | `compression-min-value-size` | `1`-`131072` bytes | `256` | Smallest value worth compressing. | Yes |
 | `compression-max-value-size` | `1`-`131072` bytes; must be at least the minimum | `131072` (128 KiB) | Largest value. Hard cap for per-value decompression and compression-job memory. | Yes |
 | `compression-dict-size` | `1024`-`1048576` bytes | `102400` (100 KiB) | Target size of a trained compression dictionary. | **No — startup only.** |
+| `compression-max-inflight-requests` | `1`-`10000` requests | `100` | Cap on queued, running, and completed-but-not-drained compression jobs. Each job holds a copy of the plain value. If you lower it, jobs in flight finish, and new jobs wait until the count is below the new cap. | Yes |
 
 The upper limit of the value sizes is `COMPRESSOR_FRAME_MAX_VALUE_LEN`, so 128 KiB is written in one place only. A bigger value is an error and is never changed without a message. `compression-mode` can not be used with `forkless-infrastructure-enabled yes` yet (§7.2).
 
@@ -402,11 +403,10 @@ None of these are configurable in v1. The mechanisms behind them run with the fi
 
 | Name | Values | Default | What it does | Change at runtime |
 |---|---|---|---|---|
-| `compression-max-inflight-requests` | requests | `100` | Cap on queued, running, and completed-but-not-drained compression jobs. | No |
 | `compression-min-savings-ratio` | percent | `10` | Net-savings guard. Below this, the frame is thrown away. | No |
 | `compression-min-idle-seconds` | seconds | `60` | Coldness gate in LRU and noeviction modes, and hot-key LRU entry lifetime in every mode. | No |
 | `compression-hot-key-lru-max-entries` | entries | `100000` | Maximum recently read keys excluded from background compression (§7.3). | No |
-| `compression-lfu-threshold` | `0`–`255` | `5` | Coldness gate in LFU mode. | No |
+| `compression-lfu-threshold` | `0`–`255` | `4` | Coldness gate in LFU mode. A new key starts at 5, so it is hot until its counter decays to 4. | No |
 | `compression-dict-min-training-keys` | int | `1000` | First training fires at this key count, and needs this many samples. | No |
 | `compression-dict-max-training-keys` | int | `10000` | Sample cap for one training scan. | No |
 | `compression-training-buffer-size` | bytes | `16777216` (16 MiB) | Sample buffer, allocated in full per scan and freed after it. | No |
@@ -417,7 +417,7 @@ None of these are configurable in v1. The mechanisms behind them run with the fi
 
 **Three controls bound background compression:**
 - `compression-max-value-size` is finite and at most 128 KiB, bounding one input snapshot and one compression operation.
-- `compression-max-inflight-requests` is 100, bounding job count, input snapshots to at most 12.5 MiB, and input plus output to at most 25 MiB.
+- `compression-max-inflight-requests` is 100 by default, bounding job count, input snapshots to at most 12.5 MiB, and input plus output to at most 25 MiB. At the maximum of 10000, the bounds are 1.25 GiB and 2.5 GiB.
 - `compression-threads` defaults to 1 and is at most 16, bounding concurrent compression and worst-case output allocations.
 
 ### 9.1 `INFO compression`

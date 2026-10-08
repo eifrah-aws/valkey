@@ -260,20 +260,21 @@ int compressorCron(void) {
     }
     if (total == 0) return 0;
 
-    /* Look at no more than COMPRESSOR_MAX_INFLIGHT_REQUESTS keys per call, and
-     * stop when that many jobs are in flight. */
-    void *samples[COMPRESSOR_MAX_INFLIGHT_REQUESTS];
+    /* Look at no more than COMPRESSOR_SAMPLES_PER_CRON keys per call, and stop
+     * when compression-max-inflight-requests jobs are in flight. */
+    void *samples[COMPRESSOR_SAMPLES_PER_CRON];
+    unsigned long max_inflight = (unsigned long)server.compression_max_inflight_requests;
     unsigned int sampled = 0;
     int queued = 0;
-    while (sampled < COMPRESSOR_MAX_INFLIGHT_REQUESTS && inflightCount() < COMPRESSOR_MAX_INFLIGHT_REQUESTS) {
+    while (sampled < COMPRESSOR_SAMPLES_PER_CRON && inflightCount() < max_inflight) {
         serverDb *db = pickDb(total);
         if (db == NULL) break;
         int didx = kvstoreGetFairRandomHashtableIndex(db->keys);
         unsigned int n =
-            kvstoreHashtableSampleEntries(db->keys, didx, samples, COMPRESSOR_MAX_INFLIGHT_REQUESTS - sampled);
+            kvstoreHashtableSampleEntries(db->keys, didx, samples, COMPRESSOR_SAMPLES_PER_CRON - sampled);
         if (n == 0) break;
         sampled += n;
-        for (unsigned int i = 0; i < n && inflightCount() < COMPRESSOR_MAX_INFLIGHT_REQUESTS; i++) {
+        for (unsigned int i = 0; i < n && inflightCount() < max_inflight; i++) {
             robj *o = samples[i];
             compressor_stats.counters.keys_checked++;
             if (!canCompress(o)) {
