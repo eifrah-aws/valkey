@@ -320,13 +320,14 @@ compressed, and checks the code paths that do not use `lookupKey()`.
   destination). `COPY` copies the frame with `compressorDupFrame()` (in
   `dupStringObject()`), so the copy is not decompressed. The same helper
   covers `objectSetKeyAndExpire()` with a refcount above 1.
-- Slot migration export: checked. The snapshot runs in a forked child
+- DONE: slot migration export: checked. The snapshot runs in a forked child
   (`childSnapshotForSyncSlot()` -> `rewriteAppendOnlyFileRio()`), which
   writes `SET key value`. `rioWriteBulkObject()` decompresses the frame into
   a temporary buffer (`src/aof.c`). The parent's memory does not change. The
   stream after the snapshot carries client writes, which are plain. No code
-  change. Left: a cluster test that migrates a compressed key: the target
-  has the right value, and the key on the source stays compressed.
+  change. Test in `tests/unit/cluster/compression-migrateslots.tcl`: the
+  source main thread decompresses nothing, the target has the right values
+  and TTL, and its sweeper compresses them again.
 - Audit all direct reads of `obj->encoding` / `objectGetEncoding()` /
   `sdsEncodedObject()` for `OBJ_STRING` that do not go through
   `lookupKey()`. Put each one in one of the four classes of design section
@@ -446,6 +447,11 @@ Goal: no memory spike during migration and replica catch-up.
   replica's own active dictionary.
 - Same eligibility and net-savings rules as the sweeper, but no coldness
   gate.
+- Found in the slot migration test: the snapshot sends `SET` and then
+  `PEXPIREAT` for a key with a TTL. On the target, `PEXPIREAT` touches the
+  key and its LFU counter goes up, so the key arrives hot until the counter
+  decays. Compress on import fixes this. If that is not done, check that
+  commands from the import source do not touch LRU/LFU.
 - Slot migration and `DUMP` / `MIGRATE` / `RESTORE` send plain bytes in v1
   (the current code, no change). Replication full sync uses the RDB, so it
   follows Phase 6. The replication stream carries client writes, which are
