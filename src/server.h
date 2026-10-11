@@ -2491,6 +2491,7 @@ struct valkeyServer {
     size_t compression_dict_size;          /* size of a trained dictionary */
     int compression_max_inflight_requests; /* most compression jobs at the same time */
     int compression_lfu_threshold;         /* LFU counter at or below which a value is cold */
+    int compression_sweeper_policy;        /* COMPRESSOR_SWEEPER_POLICY_* */
     /* Lazy free */
     int lazyfree_lazy_eviction;
     int lazyfree_lazy_expire;

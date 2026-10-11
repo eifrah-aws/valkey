@@ -245,6 +245,126 @@ static serverDb *pickDb(unsigned long long total) {
     return NULL;
 }
 
+/* Checks the value o of a key in db dbid, and queues a job when it can be
+ * compressed. Returns true when a job was queued. Otherwise returns false,
+ * and errno tells why (see canCompress() and queueJob()). */
+static bool checkKey(int dbid, robj *o) {
+    compressor_stats.counters.compression_total_keys_checked++;
+    if (!canCompress(o)) {
+        countSkippedKey(errno);
+        return false;
+    }
+    compressor_stats.counters.compression_total_keys_eligible++;
+    if (!queueJob(dbid, o)) {
+        compressor_stats.counters.compression_total_keys_skipped_already_queued++;
+        return false;
+    }
+    compressor_stats.counters.compression_total_jobs_queued++;
+    return true;
+}
+
+static bool inflightIsFull(void) {
+    return inflightCount() >= (unsigned long)server.compression_max_inflight_requests;
+}
+
+/* The random policy. total is the number of keys in all databases, and must
+ * not be 0. Returns the number of jobs queued. */
+static int sweepRandom(unsigned long long total) {
+    void *samples[COMPRESSOR_SAMPLES_PER_CRON];
+    unsigned int sampled = 0;
+    int queued = 0;
+    while (sampled < COMPRESSOR_SAMPLES_PER_CRON && !inflightIsFull()) {
+        serverDb *db = pickDb(total);
+        if (db == NULL) break;
+        int didx = kvstoreGetFairRandomHashtableIndex(db->keys);
+        unsigned int n =
+            kvstoreHashtableSampleEntries(db->keys, didx, samples, COMPRESSOR_SAMPLES_PER_CRON - sampled);
+        if (n == 0) break;
+        sampled += n;
+        for (unsigned int i = 0; i < n && !inflightIsFull(); i++) {
+            if (checkKey(db->id, samples[i])) queued++;
+        }
+    }
+    return queued;
+}
+
+/* Where the cursor policy is: the database it scans, the kvstoreScan()
+ * cursor in that database, and the number of keys of the bucket at the cursor
+ * that an earlier call already handled. They are kept from one cron call to
+ * the next. */
+static int sweep_dbid = 0;
+static unsigned long long sweep_cursor = 0;
+static unsigned int sweep_bucket_done = 0;
+
+typedef struct sweepScanData {
+    int dbid;
+    unsigned int checked;
+    int queued;
+    unsigned int skip; /* Keys of this bucket handled by an earlier call. */
+    unsigned int seen; /* Keys of this bucket given to the callback. */
+    bool stopped;      /* The callback stopped before the end of the bucket. */
+} sweepScanData;
+
+/* The scan gives the callback all keys of a bucket, with its chain, and can
+ * not stop in the middle. So the callback skips the keys that an earlier call
+ * handled, and stops checking at the key limit or when the in-flight limit is
+ * full. One cron call therefore checks at most COMPRESSOR_SAMPLES_PER_CRON
+ * keys. For the other keys, the callback only compares two counters. */
+static void sweepScanCallback(void *privdata, void *entry, int didx) {
+    UNUSED(didx);
+    sweepScanData *data = privdata;
+    if (data->seen++ < data->skip || data->stopped) return;
+    if (data->checked >= COMPRESSOR_SAMPLES_PER_CRON || inflightIsFull()) {
+        data->stopped = true;
+        sweep_bucket_done = data->seen - 1;
+        return;
+    }
+    data->checked++;
+    if (checkKey(data->dbid, entry)) data->queued++;
+}
+
+/* Moves the cursor policy to the start of the next database. After the last
+ * database, a pass is done, and the next pass starts at database 0. */
+static void sweepNextDb(void) {
+    sweep_cursor = 0;
+    sweep_bucket_done = 0;
+    if (++sweep_dbid < server.dbnum) return;
+    sweep_dbid = 0;
+    compressor_stats.counters.compression_total_sweeper_passes++;
+}
+
+/* The cursor policy. Each step scans one bucket. kvstoreScan() handles a
+ * rehash, FLUSHALL and SWAPDB: at worst a key is checked two times, or waits
+ * for the next pass. Returns the number of jobs queued. */
+static int sweepCursor(void) {
+    sweepScanData data = {0};
+    for (int steps = 0; steps < COMPRESSOR_SAMPLES_PER_CRON && data.checked < COMPRESSOR_SAMPLES_PER_CRON &&
+                        !inflightIsFull();
+         steps++) {
+        serverDb *db = sweep_dbid < server.dbnum ? server.db[sweep_dbid] : NULL;
+        if (db == NULL || kvstoreSize(db->keys) == 0) {
+            sweepNextDb();
+            continue;
+        }
+        data.dbid = db->id;
+        data.skip = sweep_bucket_done;
+        data.seen = 0;
+        unsigned long long next = kvstoreScan(db->keys, sweep_cursor, -1, -1, sweepScanCallback, NULL, &data);
+        /* When the callback stopped in the middle of the bucket, keep the
+         * cursor. The next call scans this bucket again and starts after the
+         * keys handled now. The keys come in the same order when the bucket
+         * did not change. If it changed, a key may be checked two times, or
+         * wait for the next pass. Each step handles at least one new key: the
+         * loop checks both limits before the step, and only this step can
+         * fill them. */
+        if (data.stopped) break;
+        sweep_cursor = next;
+        sweep_bucket_done = 0;
+        if (sweep_cursor == 0) sweepNextDb();
+    }
+    return data.queued;
+}
+
 int compressorCron(void) {
     if (pending_jobs == NULL || server.loading) return 0;
     /* Installing a frame changes memory that a child process (BGSAVE,
@@ -260,37 +380,11 @@ int compressorCron(void) {
     }
     if (total == 0) return 0;
 
-    /* Look at no more than COMPRESSOR_SAMPLES_PER_CRON keys per call, and stop
-     * when compression-max-inflight-requests jobs are in flight. */
-    void *samples[COMPRESSOR_SAMPLES_PER_CRON];
-    unsigned long max_inflight = (unsigned long)server.compression_max_inflight_requests;
-    unsigned int sampled = 0;
-    int queued = 0;
-    while (sampled < COMPRESSOR_SAMPLES_PER_CRON && inflightCount() < max_inflight) {
-        serverDb *db = pickDb(total);
-        if (db == NULL) break;
-        int didx = kvstoreGetFairRandomHashtableIndex(db->keys);
-        unsigned int n =
-            kvstoreHashtableSampleEntries(db->keys, didx, samples, COMPRESSOR_SAMPLES_PER_CRON - sampled);
-        if (n == 0) break;
-        sampled += n;
-        for (unsigned int i = 0; i < n && inflightCount() < max_inflight; i++) {
-            robj *o = samples[i];
-            compressor_stats.counters.compression_total_keys_checked++;
-            if (!canCompress(o)) {
-                countSkippedKey(errno);
-                continue;
-            }
-            compressor_stats.counters.compression_total_keys_eligible++;
-            if (!queueJob(db->id, o)) {
-                compressor_stats.counters.compression_total_keys_skipped_already_queued++;
-                continue;
-            }
-            compressor_stats.counters.compression_total_jobs_queued++;
-            queued++;
-        }
-    }
-    return queued;
+    /* Both policies look at no more than COMPRESSOR_SAMPLES_PER_CRON keys per
+     * call, and stop when compression-max-inflight-requests jobs are in
+     * flight. */
+    if (server.compression_sweeper_policy == COMPRESSOR_SWEEPER_POLICY_CURSOR) return sweepCursor();
+    return sweepRandom(total);
 }
 
 /* ------------------------ Installing results (beforeSleep) ------------------------ */

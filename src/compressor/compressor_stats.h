@@ -50,6 +50,7 @@ typedef struct compressorCounters {
     unsigned long long compression_total_values_dropped_changed;
     unsigned long long compression_total_values_dropped_not_eligible;
     unsigned long long compression_total_sweeps_paused_by_child;
+    unsigned long long compression_total_sweeper_passes;
     /* The sum over all workers. With more than one worker, it can grow faster
      * than real time. */
     unsigned long long compression_total_compression_time_us;

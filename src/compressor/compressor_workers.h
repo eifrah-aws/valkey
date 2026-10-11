@@ -11,8 +11,9 @@
  *
  * The main thread picks values and the worker threads compress them:
  *
- *   1. compressorCron() samples random keys. For each cold plain string that
- *      is not in a job yet, it copies the bytes and queues a job.
+ *   1. compressorCron() picks keys, with random samples or with a cursor
+ *      scan (compression-sweeper-policy). For each cold plain string that is
+ *      not in a job yet, it copies the bytes and queues a job.
  *   2. A worker compresses its copy into a frame.
  *   3. compressorBeforeSleep() installs the frame, but only when the key
  *      still holds the same bytes as the copy and can still be compressed.
@@ -32,7 +33,7 @@ int compressorWorkersInit(void);
  * the number of workers stopped. */
 int compressorWorkersKill(void);
 
-/* Samples keys and queues compression jobs. Called from serverCron().
+/* Picks keys and queues compression jobs. Called from serverCron().
  * Returns the number of jobs queued. */
 int compressorCron(void);
 

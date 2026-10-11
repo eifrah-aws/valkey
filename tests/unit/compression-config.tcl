@@ -18,6 +18,7 @@ start_server {tags {"compression external:skip"}} {
         assert_equal {compression-dict-size 102400} [r config get compression-dict-size]
         assert_equal {compression-max-inflight-requests 100} [r config get compression-max-inflight-requests]
         assert_equal {compression-lfu-threshold 4} [r config get compression-lfu-threshold]
+        assert_equal {compression-sweeper-policy cursor} [r config get compression-sweeper-policy]
     }
 
     test {Startup-only compression settings can not be changed} {
@@ -63,6 +64,14 @@ start_server {tags {"compression external:skip"}} {
         r config set compression-lfu-threshold 4
     }
 
+    test {compression-sweeper-policy can be changed at runtime} {
+        r config set compression-sweeper-policy random
+        assert_equal {compression-sweeper-policy random} [r config get compression-sweeper-policy]
+        assert_error "*argument(s) must be one of the following*" {r config set compression-sweeper-policy lru}
+        assert_equal {compression-sweeper-policy random} [r config get compression-sweeper-policy]
+        r config set compression-sweeper-policy cursor
+    }
+
     test {Compression min value size can not be greater than max} {
         assert_error "*compression-min-value-size can't be greater than compression-max-value-size*" {
             r config set compression-min-value-size 4096 compression-max-value-size 1024
@@ -94,6 +103,30 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         foreach k {a b c} { wait_compressed r $k }
         assert_equal $v [r get a]
     }
+
+    test {With one job in flight, values that do not compress do not block other keys} {
+        # Each cron call stops after one job, often in the middle of a
+        # bucket. A random value is dropped and queued again on each pass.
+        # The next call must go on after it in the bucket, not start the
+        # bucket again.
+        r config set compression-sweeper-policy cursor
+        r config set hz 100
+        r flushall
+        set v [string repeat {{"user_id":3,"role":"member"},} 40]
+        for {set i 0} {$i < 40} {incr i} {
+            r set good$i $v
+            r set bad$i [randstring 2000 2000 binary]
+            make_cold r good$i
+            make_cold r bad$i
+        }
+        wait_for_condition 200 50 {
+            [getInfoProperty [r info compression] compressed_values] == 40
+        } else {
+            fail "not all values that compress were compressed"
+        }
+        assert_equal raw [r object encoding bad0]
+        r config set hz 10
+    }
 }
 
 tags {"compression external:skip"} {
@@ -106,6 +139,7 @@ tags {"compression external:skip"} {
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-dict-size 100]
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-max-inflight-requests 0]
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-lfu-threshold 256]
+        assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-sweeper-policy lru]
         assert_match "*compression-min-value-size can't be greater than compression-max-value-size*" \
             [compression_start_fails --compression-min-value-size 2048 --compression-max-value-size 1024]
     }

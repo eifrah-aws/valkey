@@ -152,9 +152,13 @@ Retraining is triggered by drift: when the live compression ratio gets clearly w
 
 On each `compressionCron()` call, the sweeper first checks `compression-max-inflight-requests`. An in-flight request remains counted from enqueue until the main thread installs or discards its result, including queued, running, and completed-but-not-drained jobs. If the in-flight count has reached `compression-max-inflight-requests`, 100 by default, the sweeper does not sample.
 
-When capacity exists, the sampling budget per cron call is `COMPRESSOR_SAMPLES_PER_CRON`, 100 returned entries. It is a fixed value, not a setting, so a large `compression-max-inflight-requests` does not add work to one cron call. The sweeper chooses a non-empty database with probability proportional to its key count, selects one of that database's hashtables with `kvstoreGetFairRandomHashtableIndex()`, and calls `kvstoreHashtableSampleEntries()` for up to the remaining budget. If the selected hashtable has fewer entries, it repeats the database and hashtable selection until the budget is exhausted or the in-flight request cap is reached. The kvstore helper excludes importing hashtables.
+When capacity exists, the sweeper picks keys with one of two policies, set by `compression-sweeper-policy`: `cursor` (the default) or `random`. Both look at no more than `COMPRESSOR_SAMPLES_PER_CRON` keys per cron call, 500 for now. This value is not final. It will be set after a benchmark. It is a fixed value, not a setting, so a large `compression-max-inflight-requests` does not add work to one cron call. The policy can change at runtime. The cursor keeps its place when the policy changes.
 
-`kvstoreHashtableSampleEntries()` returns no more entries than requested and does not return the same entry twice within one call. Samples can repeat across cron calls, and no cursor or completed-pass state is kept. Selection is therefore probabilistic rather than an eventual-coverage guarantee. `INFO compression` reports sampled entries and eligibility rejection reasons so operators can measure repeated work and convergence as the share of compressed values rises.
+**`cursor`.** The sweeper scans all databases with `kvstoreScan()`, one bucket at a time, and keeps the database index and the cursor from one cron call to the next. When the cursor of a database comes back to 0, it moves to the next database. After the last database, a pass is done, and `compression_total_sweeper_passes` goes up. One pass checks each key one time. One cron call visits at most `COMPRESSOR_SAMPLES_PER_CRON` buckets, so a table with many empty buckets does not make the call long. A scan step gives all keys of one bucket and its chain, and can not stop in the middle. So the sweeper stops checking when it reaches the key limit or the in-flight cap, and keeps the cursor and the number of keys of that bucket it has handled. The next call scans the same bucket again, skips those keys, and goes on with the next one. One call therefore checks at most `COMPRESSOR_SAMPLES_PER_CRON` keys. For each other key of the last bucket, the callback only compares two counters, so the extra work is one bucket chain, which the hashtable resize keeps short. The keys come in the same order when the bucket did not change. If it changed, a key may be checked two times, or wait for the next pass. Each call handles at least one new key of the bucket, so a value that is queued again (for example one that does not compress) never blocks the keys after it. `kvstoreScan()` handles a rehash, `FLUSHALL`, and `SWAPDB`: at worst a key is checked two times, or waits for the next pass. It skips importing hashtables.
+
+**`random`.** The sweeper chooses a non-empty database with probability proportional to its key count, selects one of that database's hashtables with `kvstoreGetFairRandomHashtableIndex()`, and calls `kvstoreHashtableSampleEntries()` for up to the remaining budget. If the selected hashtable has fewer entries, it repeats the database and hashtable selection until the budget is exhausted or the in-flight request cap is reached. The kvstore helper excludes importing hashtables.
+
+`kvstoreHashtableSampleEntries()` returns no more entries than requested and does not return the same entry twice within one call. With `random`, samples can repeat across cron calls, and no cursor or completed-pass state is kept. Selection is therefore probabilistic rather than an eventual-coverage guarantee (section 6.1.1). `INFO compression` reports sampled entries and eligibility rejection reasons so operators can measure repeated work and convergence as the share of compressed values rises.
 
 The sweeper reads each sampled database entry directly. Sampling must not perform a normal key lookup, refresh LRU/LFU metadata, or add the key to the hot-key LRU. Candidate discovery is not a client access.
 
@@ -186,15 +190,35 @@ Two rules keep this honest. The list does **not** need to be complete: the net-s
 
 `INFO compression` counts values skipped this way, so an operator can see that a keyspace is full of images instead of guessing why the ratio is flat.
 
-**Where it runs.** `compressorCron()`, called from `serverCron()`, samples and queues jobs. The database is picked with a 64-bit random number (`genrand64_int64()` with rejection sampling), so a key count above 2^31 is covered. A small in-flight set, keyed by database and key, keeps a key out of two jobs at once. `compressorBeforeSleep()`, called from `beforeSleep()`, installs the finished frames (§6.3). Each call site costs one check when compression is off.
+**Where it runs.** `compressorCron()`, called from `serverCron()`, picks keys and queues jobs. With `random`, the database is picked with a 64-bit random number (`genrand64_int64()` with rejection sampling), so a key count above 2^31 is covered. A small in-flight set, keyed by database and key, keeps a key out of two jobs at once. `compressorBeforeSleep()`, called from `beforeSleep()`, installs the finished frames (§6.3). Each call site costs one check when compression is off.
 
 **Pause during a child process.** While a child process runs (`BGSAVE`, `BGREWRITEAOF`), the sweeper does not queue new jobs and does not install finished frames. An install frees the plain value and writes a new buffer, so it changes memory that the child still shares, and the kernel must copy those pages. Finished jobs wait in the queue until the child ends. The byte compare at install (§6.3) catches any change made in the meantime. A client read during a child does not decompress the stored value either (§7.2). It gets a temporary plain copy with the same key, TTL, and LRU/LFU data, and the stored frame does not change. Without this, a client that reads many compressed keys during a save could make the kernel copy a large part of the dataset. The copy is released when the outermost command ends (`server.execution_nesting` is 0). If the reply holds the copy, it keeps its own reference until the reply is sent. A write during a child still decompresses the stored value in place, because the command changes the key anyway. One small cost: `PFCOUNT` writes its cached count into the copy, so the cache in the stored value is not updated during a child. Modules follow a stricter rule, with or without a child: a module key handle opened for reading always gets its own plain copy, and the stored frame does not change. The handle owns the copy and frees it when it is closed. A module that scans the keyspace therefore does not decompress all of it. A module key handle opened for writing decompresses the stored value in place.
 
-The sweeper does not use a wall-clock or CPU-percentage budget. Candidate work per cron call is bounded by `COMPRESSOR_SAMPLES_PER_CRON`, 100 returned entries. At the default and `server.hz = 10`, it evaluates at most 1,000 sampled entries per second, and less when the request cap is full.
+The sweeper does not use a wall-clock or CPU-percentage budget. Candidate work per cron call is bounded by `COMPRESSOR_SAMPLES_PER_CRON`, 500 keys (and, with `cursor`, 500 buckets). At `server.hz = 10`, it checks at most 5,000 keys per second, and less when the request cap is full. With `cursor`, one pass over 1M keys takes about 200 seconds.
 
 For each eligible value, the main thread reserves one in-flight request slot before copying and enqueueing it. The reservation is released only after the main thread installs or discards the result. This keeps queued, running, and completed-but-not-drained work within `compression-max-inflight-requests`, 100 by default.
 
 A separate in-flight byte cap is unnecessary because `compression-max-value-size` is a finite hard limit. It defaults to 128 KiB, cannot be disabled, and cannot be raised above 128 KiB. Therefore 100 in-flight jobs own at most 12.5 MiB of input snapshots. Output allocation is also bounded: only running workers allocate a worst-case destination, and `compression-threads` is 1 by default and at most 16. A completed job keeps its input snapshot until the main thread installs or drops the result, because the freshness check in §6.3 compares against it. A worker drops a frame that is not smaller than its input, so a completed output is always smaller than the input. Input and output together are therefore at most 25 MiB.
+
+### 6.1.1 Discussion: random sampling or a cursor scan
+
+This point is open. v1 has both policies, so we can measure them.
+
+**The problem with random sampling.** Each sample is a random key. When a fraction `p` of the keys is still plain, a sample finds a plain key with chance `p`. With `N` cold keys and `c` checks, about `N * exp(-c/N)` keys are still plain. To find almost all of them, the sweeper needs about `N * ln(N)` checks: about 14M checks for 1M keys. Near the end, almost every check finds a key that is already compressed. `kvstoreHashtableSampleEntries()` also returns keys from neighbouring buckets, so the samples are not fully independent. The tail can be a bit longer than the formula.
+
+A benchmark with about 1M keys (`random`, 100 samples per call for most of the run) showed this:
+- 999,534 keys compressed.
+- 8,104,500 keys checked. 6,933,263 of them (86%) were already compressed. 171,703 were hot.
+- The workers used only 4.6 s of CPU with 12 threads. The cost is on the main thread, in the checks.
+
+**The cursor scan.** One pass checks each key one time, so 1M keys need about 1M checks, not 14M. The cost:
+- A key that is hot during the pass waits for the next pass. With 1M keys this is about 200 s. `random` may find it sooner by chance.
+- When all keys are compressed, each pass still checks every key and finds nothing. The waste is smaller than with `random`, but it does not go to 0.
+
+**Next steps.**
+- Backoff: pause the sweeper when recent checks found almost no eligible keys. With `cursor`, the simple rule is: pause after a pass that found no eligible key. This removes most of the waste when the data is stable.
+- Hot-key LRU expiry (section 7.3, Phase 4): when a key leaves the hot-key list after 60 s, it is a good candidate to compress again. The sweeper can check these keys first, in place of a full search.
+- Measure both policies, then choose the default and the value of `COMPRESSOR_SAMPLES_PER_CRON`.
 
 ### 6.2 The worker must not race the main thread
 
@@ -376,7 +400,7 @@ The second backend (LZ4) is operator-selectable at startup, because `compression
 
 All names are ordinary `CONFIG GET` / `CONFIG SET` settings, except `compression-mode`, `compression-threads`, and `compression-dict-size` — those three are read once at startup, like Valkey's `*_cpulist` settings, and `CONFIG SET` against them is rejected. Background compression is off unless `compression-mode` is set at boot. Decoder support remains available for compressed frames restored from RDB even when the mode is `off`.
 
-**Seven primary settings**
+**Eight primary settings**
 
 | Name | Values | Default | What it does | Change at runtime |
 |---|---|---|---|---|
@@ -387,6 +411,7 @@ All names are ordinary `CONFIG GET` / `CONFIG SET` settings, except `compression
 | `compression-dict-size` | `1024`-`1048576` bytes | `102400` (100 KiB) | Target size of a trained compression dictionary. | **No — startup only.** |
 | `compression-max-inflight-requests` | `1`-`10000` requests | `100` | Cap on queued, running, and completed-but-not-drained compression jobs. Each job holds a copy of the plain value. If you lower it, jobs in flight finish, and new jobs wait until the count is below the new cap. | Yes |
 | `compression-lfu-threshold` | `0`-`255` | `4` | Coldness gate in LFU mode: a value is cold when its LFU counter is at most this number. A new key starts at 5, so with 4 it is hot until its counter decays. With 5 or more, a new key is cold at once. | Yes |
+| `compression-sweeper-policy` | `cursor`, `random` | `cursor` | How the sweeper picks keys: a cursor scan over all databases, or random samples (sections 6.1 and 6.1.1). | Yes |
 
 The upper limit of the value sizes is `COMPRESSOR_FRAME_MAX_VALUE_LEN`, so 128 KiB is written in one place only. A bigger value is an error and is never changed without a message. `compression-mode` can not be used with `forkless-infrastructure-enabled yes` yet (§7.2).
 
@@ -404,6 +429,7 @@ None of these are configurable in v1. The mechanisms behind them run with the fi
 
 | Name | Values | Default | What it does | Change at runtime |
 |---|---|---|---|---|
+| `compression-sweep-samples` | keys | `500` | Most keys (and, with `cursor`, buckets) the sweeper checks in one cron call. The value is not final. | No |
 | `compression-min-savings-ratio` | percent | `10` | Net-savings guard. Below this, the frame is thrown away. | No |
 | `compression-min-idle-seconds` | seconds | `60` | Coldness gate in LRU and noeviction modes, and hot-key LRU entry lifetime in every mode. | No |
 | `compression-hot-key-lru-max-entries` | entries | `100000` | Maximum recently read keys excluded from background compression (§7.3). | No |
@@ -458,6 +484,7 @@ All counters change only on the main thread, so they need no atomics. A worker w
 | `compression_total_values_dropped_changed` | Counter | values | Dropped: the key changed or was deleted while it waited. |
 | `compression_total_values_dropped_not_eligible` | Counter | values | Dropped: the key became hot, in use, or out of the size range while it waited. |
 | `compression_total_sweeps_paused_by_child` | Counter | sweeper runs | Sweeper runs skipped because a child process (`BGSAVE`, `BGREWRITEAOF`) was running. |
+| `compression_total_sweeper_passes` | Counter | passes | Full passes of the `cursor` policy over all databases. Stays 0 with `random`. With stable data, `compression_total_keys_checked` grows by about the key count per pass. |
 | `compression_total_compression_time_us` | Counter | microseconds | Total time of all workers spent compressing. With more than one worker, it can grow faster than real time. |
 | `compression_total_values_decompressed` | Counter | values | Values that a read or a write made plain again. |
 | `compression_total_temporary_copies_made` | Counter | values | Temporary plain copies made, during a save or for module reads. |

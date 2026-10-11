@@ -52,13 +52,26 @@
 #define COMPRESSOR_LFU_THRESHOLD_MAX 255
 #define COMPRESSOR_LFU_THRESHOLD_DEFAULT 4
 
+/* compression-sweeper-policy: how the sweeper picks the keys it checks.
+ *
+ *   random  random samples from all databases. When most keys are already
+ *           compressed, most samples find nothing to do, and the last plain
+ *           keys are found slowly.
+ *   cursor  a scan over all databases with a cursor, one bucket at a time.
+ *           One pass checks each key one time. */
+#define COMPRESSOR_SWEEPER_POLICY_RANDOM 0
+#define COMPRESSOR_SWEEPER_POLICY_CURSOR 1
+#define COMPRESSOR_SWEEPER_POLICY_DEFAULT COMPRESSOR_SWEEPER_POLICY_CURSOR
+
 /* Fixed values. Users can not change these in v1. A later version may turn
  * them into settings. */
 
-/* The most keys the sweeper looks at in one compressorCron() call. This keeps
- * the work on the main thread small, also when
- * compression-max-inflight-requests is large. */
-#define COMPRESSOR_SAMPLES_PER_CRON 100
+/* The most keys the sweeper looks at in one compressorCron() call. With the
+ * cursor policy, it is also the most buckets the scan visits in one call, so a
+ * table with many empty buckets does not make the call long. This keeps the
+ * work on the main thread small, also when compression-max-inflight-requests
+ * is large. The value is not final. It will be set after a benchmark. */
+#define COMPRESSOR_SAMPLES_PER_CRON 500
 
 /* The net-savings guard. A compressed value is kept only when its memory is at
  * least this many percent smaller than the memory of the plain value. If not,

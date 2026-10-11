@@ -149,4 +149,36 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         assert_equal 0 [cinfo compressed_values_original_bytes]
         assert_equal 0 [cinfo compressed_values_bytes]
     }
+    test {The cursor sweeper checks each key one time per pass} {
+        r config set compression-sweeper-policy cursor
+        r flushall
+        set n 200
+        for {set i 0} {$i < $n} {incr i} {
+            r set k$i [cinfo_value $i]
+            make_cold r k$i
+        }
+        wait_for_condition 100 50 {[cinfo compressed_values] == $n} else { fail "not all keys were compressed" }
+        r config resetstat
+        wait_for_condition 100 50 {[cinfo compression_total_sweeper_passes] >= 3} else { fail "the sweeper did not finish 3 passes" }
+        # The reset can come in the middle of a pass, and a new pass can be
+        # in progress. All fields come from one INFO reply.
+        set info [r info compression]
+        set passes [getInfoProperty $info compression_total_sweeper_passes]
+        set checked [getInfoProperty $info compression_total_keys_checked]
+        assert_morethan_equal $checked [expr {($passes - 1) * $n}]
+        assert_lessthan_equal $checked [expr {($passes + 1) * $n}]
+        assert_equal $checked [getInfoProperty $info compression_total_keys_skipped_already_compressed]
+        cinfo_check_totals
+    }
+
+    test {The random sweeper compresses cold keys and does not count passes} {
+        r config set compression-sweeper-policy random
+        r flushall
+        r config resetstat
+        r set k [cinfo_value]
+        compress_key r k
+        assert_equal 0 [cinfo compression_total_sweeper_passes]
+        cinfo_check_totals
+        r config set compression-sweeper-policy cursor
+    }
 }

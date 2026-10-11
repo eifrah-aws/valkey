@@ -211,9 +211,10 @@ we can run benchmarks. This also does most of Phase 5.
     `compression-threads` workers. Each has its own `compressorAlg`. Jobs go
     through two `mutexQueue`s.
   - `compressorCron()` in `serverCron()`: samples up to
-    `COMPRESSOR_SAMPLES_PER_CRON` (100) keys (db picked by key count, then
-    `kvstoreGetFairRandomHashtableIndex()` and
-    `kvstoreHashtableSampleEntries()`). Takes RAW strings with refcount 1, in
+    `COMPRESSOR_SAMPLES_PER_CRON` (100 at the time) keys (db picked by key
+    count, then `kvstoreGetFairRandomHashtableIndex()` and
+    `kvstoreHashtableSampleEntries()`). Phase 5 added the `cursor` policy.
+    Takes RAW strings with refcount 1, in
     the size range, and cold: LFU count at most `compression-lfu-threshold`
     (4; a new key starts at 5, so it is hot until it decays), or idle at
     least `COMPRESSOR_MIN_IDLE_SECONDS`. Copies the bytes and queues a job.
@@ -359,9 +360,28 @@ Status: PARTLY DONE.
   Locking the key was rejected, because it adds latency to client writes
   (design section 6.3.1).
 - Done in `14df64e73`: `INFO compression`.
+- DONE: `compression-sweeper-policy` `cursor` (default) or `random`. `cursor`
+  scans all databases with `kvstoreScan()`, one bucket at a time, and keeps
+  its place between cron calls. One pass checks each key one time. A call
+  checks at most `COMPRESSOR_SAMPLES_PER_CRON` keys and visits at most that
+  many buckets. When it stops in the middle of a bucket (key limit or
+  in-flight limit), it keeps the cursor and the number of keys of the bucket
+  it handled. The next call skips them and goes on. Test: with one job in
+  flight, values that do not compress do not block other keys. New counter `compression_total_sweeper_passes`. The checks
+  for one key are in one helper, `checkKey()`, used by both policies.
+  `COMPRESSOR_SAMPLES_PER_CRON` is now 500. The value is not final: it will
+  be set after a benchmark. Discussion in design section 6.1.1.
 
 Left:
 
+- Backoff: pause the sweeper when recent checks found almost no eligible
+  keys. With `cursor`: pause after a pass with no eligible key. Count the
+  pauses in `INFO compression`. Tests must not wait for a paused sweeper.
+- Benchmark `cursor` and `random`, then choose the default policy and
+  `COMPRESSOR_SAMPLES_PER_CRON`. Maybe make it a setting
+  (`compression-sweep-samples`).
+- Open: use the hot-key LRU expiry (Phase 4) as a list of keys to check
+  first, in place of a full search (design section 6.1.1).
 - Magic-byte skip table (design section 6.1). A `memcmp` on the first bytes
   only. Count the skips in `INFO compression`.
 - `lz4` compresses without a dictionary (`dict_id` 0) from the start (as

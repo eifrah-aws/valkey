@@ -200,6 +200,10 @@ configEnum compression_mode_enum[] = {{"off", COMPRESSOR_ALG_NONE},
                                       {"lz4", COMPRESSOR_ALG_LZ4},
                                       {NULL, 0}};
 
+configEnum compression_sweeper_policy_enum[] = {{"random", COMPRESSOR_SWEEPER_POLICY_RANDOM},
+                                                {"cursor", COMPRESSOR_SWEEPER_POLICY_CURSOR},
+                                                {NULL, 0}};
+
 configEnum repl_compression_enum[] = {{"no", REPL_COMPRESSION_NO},
                                       {"yes", REPL_COMPRESSION_YES},
                                       {"lz4", REPL_COMPRESSION_LZ4},
@@ -3569,6 +3573,7 @@ standardConfig static_configs[] = {
     createIntConfig("compression-threads", NULL, IMMUTABLE_CONFIG, COMPRESSOR_THREADS_MIN, COMPRESSOR_THREADS_MAX, server.compression_threads, COMPRESSOR_THREADS_DEFAULT, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("compression-max-inflight-requests", NULL, MODIFIABLE_CONFIG, COMPRESSOR_MAX_INFLIGHT_REQUESTS_MIN, COMPRESSOR_MAX_INFLIGHT_REQUESTS_MAX, server.compression_max_inflight_requests, COMPRESSOR_MAX_INFLIGHT_REQUESTS_DEFAULT, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("compression-lfu-threshold", NULL, MODIFIABLE_CONFIG, COMPRESSOR_LFU_THRESHOLD_MIN, COMPRESSOR_LFU_THRESHOLD_MAX, server.compression_lfu_threshold, COMPRESSOR_LFU_THRESHOLD_DEFAULT, INTEGER_CONFIG, NULL, NULL),
+    createEnumConfig("compression-sweeper-policy", NULL, MODIFIABLE_CONFIG, compression_sweeper_policy_enum, server.compression_sweeper_policy, COMPRESSOR_SWEEPER_POLICY_DEFAULT, NULL, NULL),
     createSizeTConfig("compression-min-value-size", NULL, MODIFIABLE_CONFIG, 1, COMPRESSOR_VALUE_SIZE_MAX, server.compression_min_value_size, COMPRESSOR_MIN_VALUE_SIZE_DEFAULT, MEMORY_CONFIG, NULL, compressorConfigCheck),
     createSizeTConfig("compression-max-value-size", NULL, MODIFIABLE_CONFIG, 1, COMPRESSOR_VALUE_SIZE_MAX, server.compression_max_value_size, COMPRESSOR_MAX_VALUE_SIZE_DEFAULT, MEMORY_CONFIG, NULL, compressorConfigCheck),
     createSizeTConfig("compression-dict-size", NULL, IMMUTABLE_CONFIG, COMPRESSOR_DICT_SIZE_MIN, COMPRESSOR_DICT_SIZE_MAX, server.compression_dict_size, COMPRESSOR_DICT_SIZE_DEFAULT, MEMORY_CONFIG, NULL, NULL),
