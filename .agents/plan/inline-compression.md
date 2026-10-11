@@ -320,8 +320,13 @@ compressed, and checks the code paths that do not use `lookupKey()`.
   destination). `COPY` copies the frame with `compressorDupFrame()` (in
   `dupStringObject()`), so the copy is not decompressed. The same helper
   covers `objectSetKeyAndExpire()` with a refcount above 1.
-- Slot migration export: check `src/cluster_migrateslots.c`, and how it reads
-  values.
+- Slot migration export: checked. The snapshot runs in a forked child
+  (`childSnapshotForSyncSlot()` -> `rewriteAppendOnlyFileRio()`), which
+  writes `SET key value`. `rioWriteBulkObject()` decompresses the frame into
+  a temporary buffer (`src/aof.c`). The parent's memory does not change. The
+  stream after the snapshot carries client writes, which are plain. No code
+  change. Left: a cluster test that migrates a compressed key: the target
+  has the right value, and the key on the source stays compressed.
 - Audit all direct reads of `obj->encoding` / `objectGetEncoding()` /
   `sdsEncodedObject()` for `OBJ_STRING` that do not go through
   `lookupKey()`. Put each one in one of the four classes of design section
@@ -441,6 +446,23 @@ Goal: no memory spike during migration and replica catch-up.
   replica's own active dictionary.
 - Same eligibility and net-savings rules as the sweeper, but no coldness
   gate.
+- Slot migration and `DUMP` / `MIGRATE` / `RESTORE` send plain bytes in v1
+  (the current code, no change). Replication full sync uses the RDB, so it
+  follows Phase 6. The replication stream carries client writes, which are
+  plain. The child decompresses each
+  value into a temporary buffer while it writes it. The stored value on the
+  source does not change. The target's sweeper compresses the value later,
+  when its compression is on. This works with any target version.
+- Later, only if the bandwidth matters: send frames as they are, but only to
+  a target that can read them. Notes for that work:
+  - `CLUSTER SYNCSLOTS CAPA` is a one-way message with no reply. The target
+    can send it only after the source's `ACK` (earlier bytes can break an
+    old source's `ESTABLISH` reply reader), so it may arrive after the
+    source forked the snapshot. An option: the new target replies
+    `+OK frames` to `ESTABLISH`. An old source accepts any reply that does
+    not start with `-`.
+  - The snapshot is AOF commands. A frame needs `RESTORE key 0 <payload>
+    REPLACE` with the new RDB type of Phase 6, so this comes after Phase 6.
 - Tests: cluster test for slot migration with compression on the target
   only; replication test with compression on the replica only;
   `DEBUG DIGEST` equal on both sides.
