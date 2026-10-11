@@ -4325,7 +4325,7 @@ int VM_SelectDb(ValkeyModuleCtx *ctx, int newid) {
  * calling VM_CloseKey on the opened key.
  */
 int VM_KeyExists(ValkeyModuleCtx *ctx, robj *keyname) {
-    robj *value = lookupKeyReadWithFlags(ctx->client->db, keyname, LOOKUP_NOTOUCH);
+    robj *value = lookupKeyReadWithFlags(ctx->client->db, keyname, LOOKUP_NOTOUCH | LOOKUP_NODECOMPRESS);
     return (value != NULL);
 }
 
@@ -4666,7 +4666,15 @@ int VM_StringSet(ValkeyModuleKey *key, ValkeyModuleString *str) {
  * If the DMA is not requested for writing, the pointer returned should
  * only be accessed in a read-only fashion.
  *
- * On error (wrong type) NULL is returned.
+ * On error NULL is returned, and *len is set to 0. The errors are:
+ *
+ * - The value is not a string (wrong type).
+ * - The value is compressed (inline compression), and the key was opened
+ *   only for reading. A read handle holds a temporary plain copy of a
+ *   compressed value, so a write into it would be lost, and the copy is freed
+ *   when the key is closed. Open the key with VALKEYMODULE_WRITE to access a
+ *   compressed value. This error can happen for any string key, so always
+ *   check for NULL.
  *
  * DMA access rules:
  *
@@ -4694,7 +4702,11 @@ char *VM_StringDMA(ValkeyModuleKey *key, size_t *len, int mode) {
         return emptystring;
     }
 
-    if (objectGetType(key->value) != OBJ_STRING) return NULL;
+    /* key->owns_value: the plain copy of a compressed value (see above). */
+    if (objectGetType(key->value) != OBJ_STRING || key->owns_value) {
+        *len = 0;
+        return NULL;
+    }
 
     /* For write access, and even for read access if the object is encoded,
      * we unshare the string (that has the side effect of decoding it). */

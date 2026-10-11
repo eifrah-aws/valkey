@@ -445,7 +445,7 @@ void setKey(client *c, serverDb *db, robj *key, robj **valref, int flags) {
     else if (flags & SETKEY_ADD_OR_UPDATE)
         keyfound = -1;
     else if (!(flags & SETKEY_DOESNT_EXIST))
-        keyfound = (lookupKeyWrite(db, key) != NULL);
+        keyfound = (lookupKeyWriteWithFlags(db, key, LOOKUP_NODECOMPRESS) != NULL);
 
     if (!keyfound) {
         dbAdd(db, key, valref);

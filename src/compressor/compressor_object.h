@@ -70,7 +70,7 @@ struct serverObject *compressorCreatePlainCopy(struct serverObject *val);
  *     no child process runs. A client uses the key, so it stays plain.
  *   - a temporary plain copy, for a read while a child process runs. val
  *     stays compressed. The copy goes on the cleanup list, and
- *     compressorAfterCall() releases it. */
+ *     compressorAfterCall() releases it when the command ends. */
 struct serverObject *compressorLookupValue(struct serverObject *val, int flags);
 
 /* afterCommand() calls this. When the outermost command is done
@@ -78,8 +78,22 @@ struct serverObject *compressorLookupValue(struct serverObject *val, int flags);
  * Returns the number released, 0 inside a MULTI, script, or module call. */
 int compressorAfterCall(void);
 
+/* The number of temporary plain copies on the cleanup list. call() reads it
+ * when a command starts, and gives it to compressorReleasePlainCopiesSince()
+ * when the command ends. */
+static inline unsigned long compressorPlainCopiesListSize(void) {
+    return compressor_plain_copies;
+}
+
+/* call() calls this when a command ends, also for a command inside a MULTI, a
+ * script, or a module call. Releases the temporary plain copies that the
+ * command made: the ones added after mark, the value of
+ * compressorPlainCopiesListSize() when the command started. Returns the number
+ * released. */
+int compressorReleasePlainCopiesSince(unsigned long mark);
+
 /* Releases all temporary plain copies. Returns the number released.
- * compressorBeforeSleep() calls it too, for copies made outside a command. */
+ * compressorBeforeSleep() calls it, for copies made outside a command. */
 int compressorReleasePlainCopies(void);
 
 /* Decompresses the value of o in place. After this o is a RAW string again.

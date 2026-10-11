@@ -36,6 +36,7 @@
 
 #include "server.h"
 #include "intrinsics.h"
+#include "compressor/compressor_object.h"
 
 #include <stdint.h>
 #include <math.h>
@@ -1744,12 +1745,16 @@ void pfcountCommand(client *c) {
      * logically expired key on a replica is deleted, while with lookupKeyRead
      * it isn't, but the lookup returns NULL either way if the key is logically
      * expired, which is what matters here. */
-    o = lookupKeyRead(c->db, c->argv[1]);
+    o = lookupKeyReadWithFlags(c->db, c->argv[1], LOOKUP_NODECOMPRESS);
     if (o == NULL) {
         /* No key? Cardinality is zero since no element was added, otherwise
          * we would have a key as HLLADD creates it as a side effect. */
         addReply(c, shared.czero);
     } else {
+        /* The cached count is written into the stored value, so it must be
+         * plain. A read during a child process would get a temporary copy,
+         * and the cached count would be lost. */
+        if (compressorIsCompressedString(o)) compressorDecompressStringObject(o);
         if (isHLLObjectOrReply(c, o) != C_OK) return;
         o = dbUnshareStringValue(c->db, c->argv[1], o);
 

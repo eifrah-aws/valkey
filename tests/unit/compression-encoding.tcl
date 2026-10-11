@@ -415,6 +415,90 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         assert_equal raw [r object encoding $a]
     }
 
+    test {MULTI and EVAL during a child process hold one temporary copy at a time} {
+        r flushall
+        set keys {}
+        for {set i 0} {$i < 5} {incr i} {
+            set k [new_key]
+            lappend keys $k
+            r set $k [compression_value $i]
+            compress_key r $k
+        }
+        for {set i 0} {$i < 10} {incr i} { r set filler:$i x }
+        set made [getInfoProperty [r info compression] compression_total_temporary_copies_made]
+        r config set rdb-key-save-delay 200000
+        r bgsave
+        wait_for_condition 50 20 {[s rdb_bgsave_in_progress] == 1} else { fail "no child" }
+
+        # INFO runs after the GETs. Each GET released its copy when it ended.
+        r multi
+        foreach k $keys { r get $k }
+        r info compression
+        set res [r exec]
+        for {set i 0} {$i < 5} {incr i} { assert_equal [compression_value $i] [lindex $res $i] }
+        assert_equal 0 [getInfoProperty [lindex $res end] compression_temporary_copies]
+
+        set info [r eval {
+            for _, k in ipairs(KEYS) do server.call('get', k) end
+            return server.call('info', 'compression')
+        } [llength $keys] {*}$keys]
+        assert_equal 0 [getInfoProperty $info compression_temporary_copies]
+
+        assert_equal [expr {$made + 10}] [getInfoProperty [r info compression] compression_total_temporary_copies_made]
+        foreach k $keys { assert_equal compressed [r object encoding $k] }
+        r config set rdb-key-save-delay 0
+        waitForBgsave r
+    }
+
+    test {PFCOUNT during a child process keeps its cached count} {
+        r flushall
+        # A dense HLL is large and has many zero registers, so it compresses.
+        r config set hll-sparse-max-bytes 0
+        set k [new_key]
+        r pfadd $k a b c d e
+        compress_key r $k
+        for {set i 0} {$i < 10} {incr i} { r set filler:$i x }
+        r config set rdb-key-save-delay 200000
+        r bgsave
+        wait_for_condition 50 20 {[s rdb_bgsave_in_progress] == 1} else { fail "no child" }
+
+        # PFCOUNT writes the count into the stored value, so it decompresses it
+        # in place, also during a child.
+        set dirty [s rdb_changes_since_last_save]
+        assert_equal 5 [r pfcount $k]
+        assert_equal raw [r object encoding $k]
+        # The second PFCOUNT uses the cached count, so it does not change the
+        # key again.
+        assert_equal 5 [r pfcount $k]
+        assert_equal [expr {$dirty + 1}] [s rdb_changes_since_last_save]
+
+        r config set rdb-key-save-delay 0
+        r config set hll-sparse-max-bytes 3000
+        waitForBgsave r
+    }
+
+    test {Commands that only check if a key exists do not decompress} {
+        set k [new_key]
+        r set $k [compression_value]
+        compress_key r $k
+        set info [r info compression]
+        set decompressed [getInfoProperty $info compression_total_values_decompressed]
+        set values [getInfoProperty $info compressed_values]
+
+        assert_equal {} [r set $k x NX]
+        assert_equal {} [r set $k x IFEQ wrong]
+        assert_equal 0 [r msetnx $k x [new_key] y]
+        assert_error "*BUSYKEY*" {r restore $k 0 [r dump $k]}
+        assert_equal compressed [r object encoding $k]
+
+        # SET replaces the value. The old one is freed, not decompressed.
+        r set $k new
+        assert_equal new [r get $k]
+        set info [r info compression]
+        assert_equal $decompressed [getInfoProperty $info compression_total_values_decompressed]
+        assert_equal [expr {$values - 1}] [getInfoProperty $info compressed_values]
+    }
+
     test {DEBUG DIGEST is the same for compressed and plain values} {
         r flushall
         r set k [compression_value]

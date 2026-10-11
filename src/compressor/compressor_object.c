@@ -145,26 +145,31 @@ robj *compressorLookupValue(robj *val, int flags) {
     return copy;
 }
 
-int compressorReleasePlainCopies(void) {
-    if (plain_copies == NULL || listLength(plain_copies) == 0) return 0;
-
+int compressorReleasePlainCopiesSince(unsigned long mark) {
+    /* The copies of a command are at the end of the list, after the copies of
+     * the command that runs it (EXEC, EVAL, a module command). The outer
+     * command never uses them, and a reply that holds a copy keeps its own
+     * reference. So a script that reads many keys during a child process
+     * holds one copy at a time, not all of them. */
     int released = 0;
-    listIter li;
-    listNode *ln;
-    listRewind(plain_copies, &li);
-    while ((ln = listNext(&li)) != NULL) {
+    while (compressor_plain_copies > mark) {
+        listNode *ln = listLast(plain_copies);
         /* Drops only our reference. A reply that holds the copy keeps it. */
         decrRefCount(listNodeValue(ln));
         listDelNode(plain_copies, ln);
+        compressor_plain_copies--;
         released++;
     }
-    compressor_plain_copies = 0;
     return released;
 }
 
+int compressorReleasePlainCopies(void) {
+    return compressorReleasePlainCopiesSince(0);
+}
+
 int compressorAfterCall(void) {
-    /* Inside a MULTI, a script, or a module call, the outer command may still
-     * use the copies. */
+    /* Inside a MULTI, a script, or a module call, call() releases the copies
+     * of each inner command. */
     if (server.execution_nesting != 0) return 0;
     return compressorReleasePlainCopies();
 }

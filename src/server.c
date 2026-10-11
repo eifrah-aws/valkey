@@ -4160,6 +4160,7 @@ void call(client *c, int flags) {
     if (bgIteration_blockClientIfRequired(c)) return;
 
     server.in_call++;
+    unsigned long plain_copies_mark = compressorPlainCopiesListSize();
 
     long long dirty;
     struct ClientFlags client_old_flags = c->flag;
@@ -4421,6 +4422,9 @@ void call(client *c, int flags) {
 
     /* Do some maintenance job and cleanup */
     afterCommand(c);
+    /* Inside a MULTI, a script, or a module call, release the plain copies
+     * of this command now, not when the outermost command ends. */
+    if (unlikely(compressorHasPlainCopies())) compressorReleasePlainCopiesSince(plain_copies_mark);
 
     /* Remember the replication offset of the client, right after its last
      * command that resulted in propagation. */

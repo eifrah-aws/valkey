@@ -237,7 +237,7 @@ void restoreCommand(client *c) {
 
     /* Make sure this key does not already exist here... */
     robj *key = c->argv[1];
-    if (!replace && lookupKeyWrite(c->db, key) != NULL) {
+    if (!replace && lookupKeyWriteWithFlags(c->db, key, LOOKUP_NODECOMPRESS) != NULL) {
         addReplyErrorObject(c, shared.busykeyerr);
         return;
     }
@@ -1236,7 +1236,7 @@ clusterNode *getNodeByQuery(client *c, int *error_code) {
              * slot migration, the channel will be served from the source
              * node until the migration completes with CLUSTER SETSLOT <slot>
              * NODE <node-id>. */
-            int flags = LOOKUP_NOEFFECTS; /* not client key access */
+            int flags = LOOKUP_NOEFFECTS | LOOKUP_NODECOMPRESS; /* not client key access */
             if (!pubsubshard_included &&
                 (!c->flag.multi || (c->flag.multi && c->cmd->proc == execCommand))) {
                 /* Multi/Exec validation happens on exec */

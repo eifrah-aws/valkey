@@ -328,14 +328,42 @@ compressed, and checks the code paths that do not use `lookupKey()`.
   change. Test in `tests/unit/cluster/compression-migrateslots.tcl`: the
   source main thread decompresses nothing, the target has the right values
   and TTL, and its sweeper compresses them again.
-- Audit all direct reads of `obj->encoding` / `objectGetEncoding()` /
-  `sdsEncodedObject()` for `OBJ_STRING` that do not go through
-  `lookupKey()`. Put each one in one of the four classes of design section
-  7.1, and list them in the PR description.
+- DONE: audit of direct encoding reads and of `LOOKUP_NODECOMPRESS` callers
+  and output paths (RDB, AOF, DUMP/MIGRATE, slot migration, replication,
+  modules). Most paths are OK. Fixed:
+  - F1: `PFCOUNT` during a child wrote its cached count into a temporary
+    copy, so the count was lost and PFCOUNT was replicated each time. Now it
+    looks up with `LOOKUP_NODECOMPRESS` and decompresses in place.
+  - F3/F4: `VM_StringDMA()` returns NULL (length 0) when the read handle holds
+    a plain copy of a compressed value. A write into the copy was lost, and
+    the pointer was freed at `VM_CloseKey()`. Docs updated. Known cost: a
+    module can not read a compressed string through a READ handle (it can use
+    `VM_Call("GET")`). A compromise; we may revise it later.
+  - F5a: inside `MULTI`, a script, or a module call, temporary copies were
+    kept until the outermost command ended. Now `call()` releases the copies
+    of each command when it ends (`compressorReleasePlainCopiesSince()`).
+  - F6: lookups that only check existence or type no longer decompress:
+    `SET`, `SET NX/XX`, `MSETNX`, `MSETEX`, `setKey()`, `RESTORE` without
+    `REPLACE`, `VM_KeyExists()`, `getNodeByQuery()`, `blocked.c`.
+  - Tests in `compression-encoding.tcl`, `moduleapi/compression.tcl`,
+    `moduleapi/scan.tcl`.
+  - Skipped: F2, `VM_SetLRU()`/`VM_SetLFU()` on a READ handle of a
+    compressed key change only the copy.
 - Free path: call the backend `release()` and drop the dictionary user count
   (stub until Phase 10).
-- Forkless save: remove the startup refusal. A read of a key that the
-  forkless thread holds must not change the value in place.
+- Forkless save: remove the startup refusal. Fix first (found in the audit,
+  not reachable today, because compression and forkless can not run
+  together):
+  - `tryCloneDbEntry()` (`bgiteration.c`) copies the frame bytes into a
+    plain string when it clones a value, so the RDB gets frame bytes as the
+    user value. Do not clone compressed values, or clone the plain bytes.
+  - The save thread decompresses with the main-thread compressor and
+    updates non-atomic counters (`rdbSaveStringObject()` on the forkless
+    thread). Use a per-thread compressor, and skip the counters or make them
+    atomic.
+  - A client read (or a module write handle) decompresses in place and frees
+    the frame while the save thread reads it. Treat a value that the
+    forkless thread holds like a child process: give a temporary copy.
 - `DEBUG COMPRESS-KEY <key>`: compress one key now, for tests.
 - Tests: keyspace notifications unchanged, unit test for object free and
   size with a frame.

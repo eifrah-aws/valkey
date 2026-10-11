@@ -95,7 +95,9 @@ void setGenericCommand(client *c,
         if (getGenericCommand(c) == C_ERR) goto cleanup;
     }
 
-    robj *existing_value = lookupKeyWrite(c->db, key);
+    /* A compressed value stays compressed: SET replaces it, and IFEQ/IFNE
+     * compare it through a temporary plain copy. */
+    robj *existing_value = lookupKeyWriteWithFlags(c->db, key, LOOKUP_NODECOMPRESS);
     found = existing_value != NULL;
 
     /* Handle the IFEQ or IFNE conditional check */
@@ -594,7 +596,7 @@ void msetGenericCommand(client *c, int nx) {
      * set anything if at least one key already exists. */
     if (nx) {
         for (j = 1; j < c->argc; j += 2) {
-            if (lookupKeyWrite(c->db, c->argv[j]) != NULL) {
+            if (lookupKeyWriteWithFlags(c->db, c->argv[j], LOOKUP_NODECOMPRESS) != NULL) {
                 addReply(c, shared.czero);
                 return;
             }
@@ -680,7 +682,7 @@ void msetexCommand(client *c) {
      * All key-value pairs are located within the range [2, args_start_idx). */
     if (flags & (ARGS_SET_NX | ARGS_SET_XX)) {
         for (int j = 2; j < args_start_idx; j += 2) {
-            robj *o = lookupKeyWrite(c->db, c->argv[j]);
+            robj *o = lookupKeyWriteWithFlags(c->db, c->argv[j], LOOKUP_NODECOMPRESS);
             if (((flags & ARGS_SET_NX) && o != NULL) ||
                 ((flags & ARGS_SET_XX) && o == NULL)) {
                 addReply(c, shared.czero);
