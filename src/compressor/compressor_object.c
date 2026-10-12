@@ -60,16 +60,29 @@ sds compressorDupFrame(const robj *o) {
     return frame;
 }
 
-void compressorStringObjectFreed(const robj *o) {
-    compressorStatsRemoveValue(compressorStringObjectLen(o), compressorFrameAllocSize(objectGetVal(o)));
-}
-
 /* Reads the frame header of the compressed string o. Stops the server if the
  * header is bad. */
 static void stringObjectHeader(const robj *o, compressorFrameHeader *hdr) {
     serverAssert(objectGetType(o) == OBJ_STRING && objectGetEncoding(o) == OBJ_ENCODING_COMPRESSED);
     int err = compressorFrameParse(objectGetVal(o), hdr);
     if (err != COMPRESSOR_ERR_NONE) serverPanic("Bad compressed value: %s", compressorStrerror(err));
+}
+
+/* A frame built with a dictionary must drop its user count of the
+ * dictionary, and call the backend's release() hook. Dictionaries come in
+ * Phase 10. Until then every frame has dict_id 0, so there is nothing to do.
+ * Phase 10 can not call release() from here as it is: a free can run on a
+ * background thread (FLUSHALL ASYNC), and each compressorAlg instance belongs
+ * to one thread. */
+static void releaseFrameDictionary(const compressorFrameHeader *hdr) {
+    serverAssert(hdr->dict_id == 0);
+}
+
+void compressorStringObjectFreed(const robj *o) {
+    compressorFrameHeader hdr;
+    stringObjectHeader(o, &hdr);
+    compressorStatsRemoveValue(hdr.uncompressed_len, compressorFrameAllocSize(objectGetVal(o)));
+    releaseFrameDictionary(&hdr);
 }
 
 size_t compressorStringObjectLen(const robj *o) {

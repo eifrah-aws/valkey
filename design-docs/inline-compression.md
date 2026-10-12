@@ -303,7 +303,9 @@ The cost is an audit. Sites that read `obj->encoding` directly must handle the n
 - **Client read** → synchronously decompress in v1, keep the plain value in the keyspace, release the frame, and mark the key hot (§7.2 and §7.3). During a child process, and for module read handles, use a temporary plain copy instead (§7.2).
 - **Need plaintext for another egress path** → synchronously decompress into a temporary value without changing the keyspace: slot migration, replication propagation that materializes a stored value, `DUMP`, and `DEBUG DIGEST`.
 - **Preserve the stored representation** → do not decompress: RDB save copies the frame and persists its referenced decoder metadata and dictionary (§4.3).
-- **Only inspect or release the object** → do not decompress: object free (calls `release()` to drop the dictionary's user count when applicable), `MEMORY USAGE`, and active defragmentation.
+- **Only inspect or release the object** → do not decompress: object free (calls `release()` to drop the dictionary's user count when applicable), `MEMORY USAGE`, and active defragmentation. Today the free path (`compressorStringObjectFreed()`) reads the frame header one time, for the gauges and for `releaseFrameDictionary()`. That function only checks that `dict_id` is 0, because no frame has a dictionary before Phase 10. Phase 10 can not call `release()` there as it is: a free can run on a background thread (`FLUSHALL ASYNC`), and each `compressorAlg` instance belongs to one thread.
+
+`DEBUG COMPRESS-KEY <key>` compresses one value now, on the main thread, for tests. It makes the same checks as the sweeper, except the coldness test, and keeps the net-savings guard. It does not change the sweeper counters, so their sums stay right; the `compressed_*` gauges change as usual. It replies `OK`, or an error with the reason. Compressing a value (by the sweeper or by this command) and decompressing it in place send no keyspace events, because the logical value does not change.
 
 ### 7.2 The read helper
 

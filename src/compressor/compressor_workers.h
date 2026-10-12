@@ -24,6 +24,10 @@
  *
  * Workers never touch the keyspace. They only see their own copy. */
 
+#include <stdbool.h>
+
+struct client;
+
 /* Starts compression-threads workers when compression-mode is not off.
  * Called once at startup, from InitServerLast(). Returns the number of
  * workers started, 0 when compression is off. */
@@ -43,5 +47,10 @@ unsigned long compressorJobsInFlight(void);
 /* Installs the frames that the workers finished. Called from beforeSleep().
  * Returns the number of frames installed. */
 int compressorBeforeSleep(void);
+
+/* DEBUG COMPRESS-KEY <key>: compresses the value of the key now, also when it
+ * is not cold, and replies OK or an error with the reason. For tests. Returns
+ * true when the value was compressed. */
+bool compressorDebugCompressKey(struct client *c);
 
 #endif /* COMPRESSOR_WORKERS_H */

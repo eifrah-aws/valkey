@@ -118,6 +118,29 @@ TEST_F(CompressorObjectTest, GetDecodedObjectGivesPlainCopy) {
     decrRefCount(o);
 }
 
+TEST_F(CompressorObjectTest, FreeAndSizeWithAFrame) {
+    unsigned long long values = compressor_stats.gauges.compressed_values;
+    unsigned long long original = compressor_stats.gauges.compressed_values_original_bytes;
+    unsigned long long frames = compressor_stats.gauges.compressed_values_bytes;
+
+    robj *o = createCompressed(value, value_len);
+    size_t frame_alloc = compressorFrameAllocSize((sds)objectGetVal(o));
+    EXPECT_EQ(compressor_stats.gauges.compressed_values, values + 1);
+    EXPECT_EQ(compressor_stats.gauges.compressed_values_original_bytes, original + value_len);
+    EXPECT_EQ(compressor_stats.gauges.compressed_values_bytes, frames + frame_alloc);
+
+    /* MEMORY USAGE counts the frame, not the plain value. */
+    size_t size = objectComputeSize(NULL, o, 0, 0);
+    EXPECT_EQ(size, zmalloc_size(o) + sdsAllocSize((sds)objectGetVal(o)));
+    EXPECT_LT(size, zmalloc_size(o) + value_len);
+
+    /* The free removes the value from the gauges. */
+    decrRefCount(o);
+    EXPECT_EQ(compressor_stats.gauges.compressed_values, values);
+    EXPECT_EQ(compressor_stats.gauges.compressed_values_original_bytes, original);
+    EXPECT_EQ(compressor_stats.gauges.compressed_values_bytes, frames);
+}
+
 TEST_F(CompressorObjectTest, DupStringObjectCopiesTheFrame) {
     robj *o = createCompressed(value, value_len);
     unsigned long long before = compressor_stats.gauges.compressed_values;

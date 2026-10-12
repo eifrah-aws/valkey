@@ -415,6 +415,8 @@ void debugCommand(client *c) {
             "CHANGE-REPL-ID",
             "    Change the replication IDs of the instance.",
             "    Dangerous: should be used only for testing the replication subsystem.",
+            "COMPRESS-KEY <key>",
+            "    Compress the value of `key` now, also when it is not cold (inline compression).",
             "CONFIG-REWRITE-FORCE-ALL",
             "    Like CONFIG REWRITE but writes all configuration options, including",
             "    keywords not listed in original configuration file or default values.",
@@ -756,6 +758,8 @@ void debugCommand(client *c) {
         s = sdscatprintf(s, "%s", extra);
         addReplyStatusLength(c, s, sdslen(s));
         sdsfree(s);
+    } else if (!strcasecmp(objectGetVal(c->argv[1]), "compress-key") && c->argc == 3) {
+        compressorDebugCompressKey(c);
     } else if (!strcasecmp(objectGetVal(c->argv[1]), "sdslen") && c->argc == 3) {
         robj *val;
         sds key;

@@ -36,6 +36,10 @@ start_server {tags {"compression external:skip"} overrides {maxmemory-policy all
         after 500
         assert_equal raw [r object encoding k]
     }
+
+    test {DEBUG COMPRESS-KEY fails when compression-mode is off} {
+        assert_error "*compression-mode is off*" {r debug compress-key k}
+    } {} {needs:debug}
 }
 
 start_server {tags {"compression external:skip"} overrides {compression-mode lz4 maxmemory-policy allkeys-lfu}} {
@@ -43,6 +47,61 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         r set k [compression_value]
         compress_key r k
         assert_equal [compression_value] [r get k]
+    }
+
+    test {DEBUG COMPRESS-KEY compresses a hot value now} {
+        set k [new_key]
+        r set $k [compression_value]
+        set info [r info compression]
+        set queued [getInfoProperty $info compression_total_jobs_queued]
+        set values [getInfoProperty $info compressed_values]
+        assert_equal OK [r debug compress-key $k]
+        assert_equal compressed [r object encoding $k]
+        # The gauges change, the sweeper counters do not.
+        set info [r info compression]
+        assert_equal [expr {$values + 1}] [getInfoProperty $info compressed_values]
+        assert_equal $queued [getInfoProperty $info compression_total_jobs_queued]
+        assert_equal [compression_value] [r get $k]
+    } {} {needs:debug}
+
+    test {DEBUG COMPRESS-KEY replies with the reason when it can't compress} {
+        assert_error "*no such key*" {r debug compress-key nosuchkey}
+        set k [new_key]
+        r set $k [compression_value]
+        r debug compress-key $k
+        assert_error "*already compressed*" {r debug compress-key $k}
+        r rpush list:$k a
+        assert_error "*not a plain string*" {r debug compress-key list:$k}
+        # APPEND makes a RAW string. A short SET value is embedded (EMBSTR).
+        r set small:$k a
+        r append small:$k [string repeat a 99]
+        assert_error "*size is outside the configured range*" {r debug compress-key small:$k}
+        r set random:$k [randstring 2000 2000 binary]
+        assert_error "*does not compress enough*" {r debug compress-key random:$k}
+        assert_equal raw [r object encoding random:$k]
+    } {} {needs:debug}
+
+    test {Compressing and decompressing a value sends no keyspace events} {
+        set k [new_key]
+        r set $k [compression_value]
+        make_cold r $k
+        r config set notify-keyspace-events KEA
+        set rd [valkey_deferring_client]
+        $rd psubscribe __key*__:*
+        $rd read
+        # The sweeper installs the frame. The next events must be the ones of
+        # the marker key.
+        wait_compressed r $k
+        r set marker 1
+        assert_match "*marker*" [$rd read]
+        assert_match "*marker*" [$rd read]
+        # A GET decompresses the value in place.
+        assert_equal [compression_value] [r get $k]
+        assert_equal raw [r object encoding $k]
+        r set marker 2
+        assert_match "*marker*" [$rd read]
+        $rd close
+        r config set notify-keyspace-events ""
     }
 
     test {With LFU, a new key stays plain until it is cold} {

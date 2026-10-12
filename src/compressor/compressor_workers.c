@@ -152,16 +152,14 @@ static bool isCold(robj *o) {
     return lru_getIdleSecs(objectGetLRU(o)) >= COMPRESSOR_MIN_IDLE_SECONDS;
 }
 
-/* Can the value o be compressed now? Used when a value is picked and again
- * when its frame is installed, because the value or the settings can change
- * in between. Returns false and sets errno when it can't:
+/* Can the value o be compressed, if it is cold? Returns false and sets errno
+ * when it can't:
  *
  *   EALREADY  already compressed
  *   EINVAL  not a plain (RAW) string
  *   EBUSY   someone else holds the object, and may read the plain bytes
- *   ERANGE  the size is outside the configured range
- *   EAGAIN  the value is not cold */
-static bool canCompress(robj *o) {
+ *   ERANGE  the size is outside the configured range */
+static bool canCompressValue(robj *o) {
     if (compressorIsCompressedString(o)) {
         errno = EALREADY;
         return false;
@@ -179,6 +177,15 @@ static bool canCompress(robj *o) {
         errno = ERANGE;
         return false;
     }
+    return true;
+}
+
+/* Can the value o be compressed now? Used when a value is picked and again
+ * when its frame is installed, because the value or the settings can change
+ * in between. Returns false and sets errno when it can't: see
+ * canCompressValue(), and EAGAIN when the value is not cold. */
+static bool canCompress(robj *o) {
+    if (!canCompressValue(o)) return false;
     if (!isCold(o)) {
         errno = EAGAIN;
         return false;
@@ -456,4 +463,60 @@ int compressorBeforeSleep(void) {
     }
     fifoRelease(done);
     return installed;
+}
+
+/* --------------------------- DEBUG COMPRESS-KEY --------------------------- */
+
+/* Compresses the value of key in db now, on the main thread. It makes the
+ * same checks as the sweeper, except the coldness test, and keeps the
+ * net-savings guard. It does not change the sweeper counters, so their sums
+ * stay right. It also runs during a child process: it is a test tool. Returns
+ * false and sets errno when it can't: ENOTSUP when compression is off, ENOENT
+ * when there is no such key, ERANGE when the value does not compress enough,
+ * and the codes of canCompressValue(). */
+static bool compressKeyNow(serverDb *db, robj *key) {
+    if (pending_jobs == NULL) {
+        errno = ENOTSUP;
+        return false;
+    }
+    robj *o = dbFind(db, objectGetVal(key));
+    if (o == NULL) {
+        errno = ENOENT;
+        return false;
+    }
+    if (!canCompressValue(o)) return false;
+
+    sds plain = objectGetVal(o);
+    compressorAlg *c = compressorGetForMainThread(server.compression_mode);
+    sds frame = c ? compressorFrameBuild(c, OBJ_ENCODING_RAW, plain, sdslen(plain), NULL) : NULL;
+    if (frame == NULL || !compressorFrameSavesMemory(compressorFrameAllocSize(plain), compressorFrameAllocSize(frame),
+                                                     COMPRESSOR_MIN_SAVINGS_PCT)) {
+        sdsfree(frame);
+        errno = ERANGE;
+        return false;
+    }
+    compressorSetCompressedValue(o, frame);
+    return true;
+}
+
+static const char *compressKeyError(int err) {
+    switch (err) {
+    case ENOTSUP: return "compression-mode is off";
+    case ENOENT: return "no such key";
+    case EALREADY: return "the value is already compressed";
+    case EINVAL: return "the value is not a plain string";
+    case EBUSY: return "the value is in use";
+    case ERANGE: return "the value size is outside the configured range, or it does not compress enough";
+    default: return "unknown error";
+    }
+}
+
+bool compressorDebugCompressKey(client *c) {
+    bool done = compressKeyNow(c->db, c->argv[2]);
+    if (done) {
+        addReply(c, shared.ok);
+    } else {
+        addReplyErrorFormat(c, "Can't compress the key: %s", compressKeyError(errno));
+    }
+    return done;
 }

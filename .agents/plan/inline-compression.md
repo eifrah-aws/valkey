@@ -349,8 +349,12 @@ compressed, and checks the code paths that do not use `lookupKey()`.
     `moduleapi/scan.tcl`.
   - Skipped: F2, `VM_SetLRU()`/`VM_SetLFU()` on a READ handle of a
     compressed key change only the copy.
-- Free path: call the backend `release()` and drop the dictionary user count
-  (stub until Phase 10).
+- DONE: free path stub. `compressorStringObjectFreed()` reads the frame
+  header one time, for the gauges and for `releaseFrameDictionary()`, which
+  only asserts `dict_id == 0`. Phase 10 adds the dictionary user count and
+  the backend `release()` call. Note for Phase 10: a free can run on a
+  background thread (`FLUSHALL ASYNC`), and each `compressorAlg` instance
+  belongs to one thread.
 - Forkless save: remove the startup refusal. Fix first (found in the audit,
   not reachable today, because compression and forkless can not run
   together):
@@ -364,9 +368,15 @@ compressed, and checks the code paths that do not use `lookupKey()`.
   - A client read (or a module write handle) decompresses in place and frees
     the frame while the save thread reads it. Treat a value that the
     forkless thread holds like a child process: give a temporary copy.
-- `DEBUG COMPRESS-KEY <key>`: compress one key now, for tests.
-- Tests: keyspace notifications unchanged, unit test for object free and
-  size with a frame.
+- DONE: `DEBUG COMPRESS-KEY <key>`: compresses one key now, on the main
+  thread, also when it is not cold (`compressorDebugCompressKey()` in
+  `compressor_workers.c`). Same checks as the sweeper except coldness
+  (`canCompressValue()`), and the net-savings guard. It does not change the
+  sweeper counters. Replies OK or an error with the reason. The test helper
+  `compress_key` still uses the sweeper.
+- DONE: tests. No keyspace events when a value is compressed or decompressed
+  in place (`compression-encoding.tcl`). Unit test for the gauges on free and
+  for `objectComputeSize()` with a frame (`FreeAndSizeWithAFrame`).
 
 ## Phase 4 - Hot-key LRU
 
