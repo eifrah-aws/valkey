@@ -2484,14 +2484,15 @@ struct valkeyServer {
     int lua_enable_insecure_api;    /* Config to enable insecure api */
     int lua_insecure_api_current;   /* Current value of if insecure apis are enabled, used to determine if flush is needed. */
     /* Inline compression. See compressor/compressor_config.h. */
-    int compression_mode;                  /* compressorAlgId, COMPRESSOR_ALG_NONE = off */
-    int compression_threads;               /* worker threads */
-    size_t compression_min_value_size;     /* smallest value to compress */
-    size_t compression_max_value_size;     /* largest value to compress */
-    size_t compression_dict_size;          /* size of a trained dictionary */
-    int compression_max_inflight_requests; /* most compression jobs at the same time */
-    int compression_lfu_threshold;         /* LFU counter at or below which a value is cold */
-    int compression_sweeper_policy;        /* COMPRESSOR_SWEEPER_POLICY_* */
+    int compression_mode;                    /* compressorAlgId, COMPRESSOR_ALG_NONE = off */
+    int compression_threads;                 /* worker threads */
+    size_t compression_min_value_size;       /* smallest value to compress */
+    size_t compression_max_value_size;       /* largest value to compress */
+    size_t compression_dict_size;            /* size of a trained dictionary */
+    int compression_max_inflight_requests;   /* most compression jobs at the same time */
+    int compression_lfu_threshold;           /* LFU counter at or below which a value is cold */
+    int compression_sweeper_policy;          /* COMPRESSOR_SWEEPER_POLICY_* */
+    int compression_sweeper_backoff_seconds; /* pause after a pass with almost no work, 0 = off */
     /* Lazy free */
     int lazyfree_lazy_eviction;
     int lazyfree_lazy_expire;

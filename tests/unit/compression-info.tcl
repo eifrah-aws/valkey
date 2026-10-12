@@ -130,9 +130,12 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         assert_equal 1 [cinfo compressed_values]
         # The sweeper keeps running, so compression_total_keys_checked can grow again right after
         # the reset. It is still far below the value before the reset.
+        # Without the backoff, the sweeper keeps checking the one key.
+        r config set compression-sweeper-backoff-seconds 0
         wait_for_condition 100 50 {[cinfo compression_total_keys_checked] > 1000} else { fail "the sweeper did not run" }
         set before [cinfo compression_total_keys_checked]
         r config resetstat
+        r config set compression-sweeper-backoff-seconds 60
         assert_lessthan [cinfo compression_total_keys_checked] $before
         assert_equal 0 [cinfo compression_total_values_compressed]
         assert_equal 0 [cinfo compression_total_temporary_copies_made]
@@ -158,6 +161,8 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
             make_cold r k$i
         }
         wait_for_condition 100 50 {[cinfo compressed_values] == $n} else { fail "not all keys were compressed" }
+        # All keys are compressed, so each pass would start a backoff pause.
+        r config set compression-sweeper-backoff-seconds 0
         r config resetstat
         wait_for_condition 100 50 {[cinfo compression_total_sweeper_passes] >= 3} else { fail "the sweeper did not finish 3 passes" }
         # The reset can come in the middle of a pass, and a new pass can be
@@ -169,6 +174,74 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         assert_lessthan_equal $checked [expr {($passes + 1) * $n}]
         assert_equal $checked [getInfoProperty $info compression_total_keys_skipped_already_compressed]
         cinfo_check_totals
+        r config set compression-sweeper-backoff-seconds 60
+    }
+
+    test {The cursor sweeper pauses after a pass with no eligible key} {
+        r config set compression-sweeper-policy cursor
+        r flushall
+        # Reset first: the pause can start right after the key is compressed.
+        r config resetstat
+        r set k [cinfo_value]
+        compress_key r k
+        # The next full pass finds only compressed keys, so the sweeper pauses.
+        wait_for_condition 100 50 {[cinfo compression_total_sweeper_backoffs] >= 1} else { fail "no backoff" }
+        assert_equal 1 [cinfo compression_sweeper_paused]
+        set checked [cinfo compression_total_keys_checked]
+        after 1000
+        assert_equal $checked [cinfo compression_total_keys_checked]
+        assert_equal 1 [cinfo compression_total_sweeper_backoffs]
+
+        # A new cold key waits. A change of the setting wakes the sweeper.
+        r set k2 [cinfo_value 1]
+        set threshold [lindex [r config get compression-lfu-threshold] 1]
+        r restore k2 0 [r dump k2] REPLACE FREQ $threshold
+        after 500
+        assert_equal raw [r object encoding k2]
+        r config set compression-sweeper-backoff-seconds 59
+        assert_equal 0 [cinfo compression_sweeper_paused]
+        wait_compressed r k2
+        r config set compression-sweeper-backoff-seconds 60
+    }
+
+    test {A wake during a pause, with no new key, pauses again after one pass} {
+        # The sweeper is paused, so it is at the start of a pass. The next
+        # pass covers the whole keyspace and can start a new pause.
+        wait_for_condition 100 50 {[cinfo compression_sweeper_paused] == 1} else { fail "not paused" }
+        set backoffs [cinfo compression_total_sweeper_backoffs]
+        set passes [cinfo compression_total_sweeper_passes]
+        r config set compression-sweeper-backoff-seconds 59
+        wait_for_condition 100 50 {[cinfo compression_total_sweeper_backoffs] > $backoffs} else { fail "no new backoff" }
+        assert_equal [expr {$passes + 1}] [cinfo compression_total_sweeper_passes]
+        r config set compression-sweeper-backoff-seconds 60
+    }
+
+    test {The backoff ends after compression-sweeper-backoff-seconds} {
+        r config set compression-sweeper-backoff-seconds 1
+        r config resetstat
+        wait_for_condition 100 50 {[cinfo compression_total_sweeper_backoffs] >= 1} else { fail "no backoff" }
+        # After the pause a new pass starts. It finds nothing, so it pauses again.
+        wait_for_condition 100 50 {[cinfo compression_total_sweeper_backoffs] >= 2} else { fail "the pause did not end" }
+        r config set compression-sweeper-backoff-seconds 60
+    }
+
+    test {With compression-sweeper-backoff-seconds 0 the sweeper does not pause} {
+        r config set compression-sweeper-backoff-seconds 0
+        r config resetstat
+        wait_for_condition 100 50 {[cinfo compression_total_sweeper_passes] >= 3} else { fail "no passes" }
+        assert_equal 0 [cinfo compression_total_sweeper_backoffs]
+        assert_equal 0 [cinfo compression_sweeper_paused]
+        r config set compression-sweeper-backoff-seconds 60
+    }
+
+    test {The random sweeper does not pause} {
+        r config set compression-sweeper-policy random
+        r config resetstat
+        set checked [cinfo compression_total_keys_checked]
+        wait_for_condition 100 50 {[cinfo compression_total_keys_checked] > $checked + 1000} else { fail "the sweeper did not run" }
+        assert_equal 0 [cinfo compression_total_sweeper_backoffs]
+        assert_equal 0 [cinfo compression_sweeper_paused]
+        r config set compression-sweeper-policy cursor
     }
 
     test {The random sweeper compresses cold keys and does not count passes} {

@@ -41,6 +41,7 @@
 #include "lrulfu.h"
 #include "throttle_repl.h"
 #include "compressor/compressor_config.h"
+#include "compressor/compressor_workers.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -3574,6 +3575,7 @@ standardConfig static_configs[] = {
     createIntConfig("compression-max-inflight-requests", NULL, MODIFIABLE_CONFIG, COMPRESSOR_MAX_INFLIGHT_REQUESTS_MIN, COMPRESSOR_MAX_INFLIGHT_REQUESTS_MAX, server.compression_max_inflight_requests, COMPRESSOR_MAX_INFLIGHT_REQUESTS_DEFAULT, INTEGER_CONFIG, NULL, NULL),
     createIntConfig("compression-lfu-threshold", NULL, MODIFIABLE_CONFIG, COMPRESSOR_LFU_THRESHOLD_MIN, COMPRESSOR_LFU_THRESHOLD_MAX, server.compression_lfu_threshold, COMPRESSOR_LFU_THRESHOLD_DEFAULT, INTEGER_CONFIG, NULL, NULL),
     createEnumConfig("compression-sweeper-policy", NULL, MODIFIABLE_CONFIG, compression_sweeper_policy_enum, server.compression_sweeper_policy, COMPRESSOR_SWEEPER_POLICY_DEFAULT, NULL, NULL),
+    createIntConfig("compression-sweeper-backoff-seconds", NULL, MODIFIABLE_CONFIG, COMPRESSOR_SWEEPER_BACKOFF_SECONDS_MIN, COMPRESSOR_SWEEPER_BACKOFF_SECONDS_MAX, server.compression_sweeper_backoff_seconds, COMPRESSOR_SWEEPER_BACKOFF_SECONDS_DEFAULT, INTEGER_CONFIG, NULL, compressorSweeperBackoffApply),
     createSizeTConfig("compression-min-value-size", NULL, MODIFIABLE_CONFIG, 1, COMPRESSOR_VALUE_SIZE_MAX, server.compression_min_value_size, COMPRESSOR_MIN_VALUE_SIZE_DEFAULT, MEMORY_CONFIG, NULL, compressorConfigCheck),
     createSizeTConfig("compression-max-value-size", NULL, MODIFIABLE_CONFIG, 1, COMPRESSOR_VALUE_SIZE_MAX, server.compression_max_value_size, COMPRESSOR_MAX_VALUE_SIZE_DEFAULT, MEMORY_CONFIG, NULL, compressorConfigCheck),
     createSizeTConfig("compression-dict-size", NULL, IMMUTABLE_CONFIG, COMPRESSOR_DICT_SIZE_MIN, COMPRESSOR_DICT_SIZE_MAX, server.compression_dict_size, COMPRESSOR_DICT_SIZE_DEFAULT, MEMORY_CONFIG, NULL, NULL),

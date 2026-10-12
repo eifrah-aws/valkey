@@ -11,6 +11,17 @@ proc make_cold {r key} {
     if {$ttl < 0} { set ttl 0 }
     set threshold [lindex [$r config get compression-lfu-threshold] 1]
     $r restore $key $ttl [$r dump $key] REPLACE FREQ $threshold
+    wake_sweeper $r
+}
+
+# Ends the backoff pause of the cursor sweeper. After a pass with almost no
+# eligible key it pauses for compression-sweeper-backoff-seconds, and a change
+# of that setting ends the pause. CONFIG SET to the same value changes
+# nothing, so this sets 0 and then the old value.
+proc wake_sweeper {r} {
+    set seconds [lindex [$r config get compression-sweeper-backoff-seconds] 1]
+    $r config set compression-sweeper-backoff-seconds 0
+    $r config set compression-sweeper-backoff-seconds $seconds
 }
 
 # Waits until the sweeper compressed key.

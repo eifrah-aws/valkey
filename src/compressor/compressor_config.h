@@ -63,6 +63,16 @@
 #define COMPRESSOR_SWEEPER_POLICY_CURSOR 1
 #define COMPRESSOR_SWEEPER_POLICY_DEFAULT COMPRESSOR_SWEEPER_POLICY_CURSOR
 
+/* compression-sweeper-backoff-seconds: with the cursor policy, the sweeper
+ * pauses for this many seconds after a pass in which less than
+ * COMPRESSOR_BACKOFF_MIN_ELIGIBLE_PCT of the checked keys were eligible.
+ * Then a new pass starts. 0 turns the backoff off. The default matches
+ * COMPRESSOR_MIN_IDLE_SECONDS: keys that are hot now can be cold by then.
+ * A change of this setting (CONFIG SET to another value) ends a pause at once. */
+#define COMPRESSOR_SWEEPER_BACKOFF_SECONDS_MIN 0
+#define COMPRESSOR_SWEEPER_BACKOFF_SECONDS_MAX 3600
+#define COMPRESSOR_SWEEPER_BACKOFF_SECONDS_DEFAULT 60
+
 /* Fixed values. Users can not change these in v1. A later version may turn
  * them into settings. */
 
@@ -72,6 +82,12 @@
  * work on the main thread small, also when compression-max-inflight-requests
  * is large. The value is not final. It will be set after a benchmark. */
 #define COMPRESSOR_SAMPLES_PER_CRON 500
+
+/* The backoff of the cursor sweeper starts when less than this many percent
+ * of the keys checked in a pass were eligible. Not 0: a pass over 1M keys
+ * that finds a few new cold keys costs as much as one that finds none. The
+ * few keys wait for the next pass. */
+#define COMPRESSOR_BACKOFF_MIN_ELIGIBLE_PCT 1
 
 /* The net-savings guard. A compressed value is kept only when its memory is at
  * least this many percent smaller than the memory of the plain value. If not,

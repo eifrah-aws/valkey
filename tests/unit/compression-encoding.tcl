@@ -118,6 +118,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         r config set compression-lfu-threshold 5
         set k [new_key]
         r set $k [compression_value]
+        wake_sweeper r
         wait_compressed r $k
         r config set compression-lfu-threshold 4
         set k2 [new_key]
@@ -641,6 +642,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         r set hot [compression_value 1]
         r set src [compression_value 2]
         r restore cold 0 [r dump src] IDLETIME 120
+        wake_sweeper r
         wait_compressed r cold
         assert_equal raw [r object encoding hot]
         assert_equal [compression_value 2] [r get cold]

@@ -19,6 +19,7 @@ start_server {tags {"compression external:skip"}} {
         assert_equal {compression-max-inflight-requests 100} [r config get compression-max-inflight-requests]
         assert_equal {compression-lfu-threshold 4} [r config get compression-lfu-threshold]
         assert_equal {compression-sweeper-policy cursor} [r config get compression-sweeper-policy]
+        assert_equal {compression-sweeper-backoff-seconds 60} [r config get compression-sweeper-backoff-seconds]
     }
 
     test {Startup-only compression settings can not be changed} {
@@ -70,6 +71,16 @@ start_server {tags {"compression external:skip"}} {
         assert_error "*argument(s) must be one of the following*" {r config set compression-sweeper-policy lru}
         assert_equal {compression-sweeper-policy random} [r config get compression-sweeper-policy]
         r config set compression-sweeper-policy cursor
+    }
+
+    test {compression-sweeper-backoff-seconds can be changed at runtime and has limits} {
+        r config set compression-sweeper-backoff-seconds 0
+        assert_equal {compression-sweeper-backoff-seconds 0} [r config get compression-sweeper-backoff-seconds]
+        r config set compression-sweeper-backoff-seconds 3600
+        assert_error "*must be between 0 and 3600*" {r config set compression-sweeper-backoff-seconds -1}
+        assert_error "*must be between 0 and 3600*" {r config set compression-sweeper-backoff-seconds 3601}
+        assert_equal {compression-sweeper-backoff-seconds 3600} [r config get compression-sweeper-backoff-seconds]
+        r config set compression-sweeper-backoff-seconds 60
     }
 
     test {Compression min value size can not be greater than max} {
@@ -140,6 +151,7 @@ tags {"compression external:skip"} {
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-max-inflight-requests 0]
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-lfu-threshold 256]
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-sweeper-policy lru]
+        assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-sweeper-backoff-seconds 3601]
         assert_match "*compression-min-value-size can't be greater than compression-max-value-size*" \
             [compression_start_fails --compression-min-value-size 2048 --compression-max-value-size 1024]
     }

@@ -44,6 +44,14 @@ int compressorCron(void);
 /* Jobs queued, running, or done but not installed yet. */
 unsigned long compressorJobsInFlight(void);
 
+/* True while the cursor sweeper is in its backoff pause. */
+bool compressorSweeperIsPaused(void);
+
+/* The apply function of compression-sweeper-backoff-seconds. Ends a backoff
+ * pause, so a change of the setting wakes the sweeper. CONFIG SET does not call
+ * it when the value does not change. Returns 1, it can not fail. */
+int compressorSweeperBackoffApply(const char **err);
+
 /* Installs the frames that the workers finished. Called from beforeSleep().
  * Returns the number of frames installed. */
 int compressorBeforeSleep(void);

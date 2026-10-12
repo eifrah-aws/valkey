@@ -16,29 +16,34 @@ feature unreachable or safe when `compression-mode off` (the default).
 
 ## Status
 
-All commits below are pushed to `origin/valkey-inline-compression` (the
-`eifrah-aws/valkey` fork).
+One line per task. `[DONE]` tasks are pushed to `origin/valkey-inline-compression`
+(the `eifrah-aws/valkey` fork). `[WIP]` means work has started and is not
+done. `[NOT STARTED]` means no work has started.
 
-| Phase | State | Commit |
-|---|---|---|
-| 0 - Compressor interface and LZ4 backend | DONE, pushed | `89e80d243` |
-| 1 - Compression frame | DONE, pushed | `e37891511` |
-| 2 - Configuration | DONE, pushed | `cc4fbb5fa` |
-| 3a - Full cycle: encoding, read path, background workers | DONE, pushed | `eba2a8ffd` |
-| Design doc moved to `design-docs/` and aligned | DONE, pushed | `f28ce0cb1` |
-| Fix the Linux build (`pthread_setname_np`) | DONE, pushed | `dd894985d` |
-| INFO compression (part of Phase 5) | DONE, pushed | `14df64e73` |
-| LFU threshold 4, `compression-max-inflight-requests` setting | DONE | this commit |
-| 5 - Background sweeper | PARTLY DONE (see Phase 5) | `eba2a8ffd`, `14df64e73` |
-| 3b - Other read paths | NEXT | - |
-| 4 - Hot-key LRU | TODO | - |
-| 6 - RDB and AOF preamble persistence | TODO | - |
-| 7 - Inline compression on import and replica apply (RESTORE, MIGRATE) | TODO | - |
-| 8 - Measurements | TODO | - |
-| 9 - Documentation | TODO | - |
-| 10 - Dictionary registry | TODO, after the measurements | - |
-| 11 - zstd backend and training | TODO, last | - |
-| Off-loading: decompress in the I/O thread | IDEA, not scheduled | - |
+1. [DONE] Phase 0 - Compressor interface and LZ4 backend (`89e80d243`).
+2. [DONE] Phase 1 - Compression frame, 10-byte header (`e37891511`).
+3. [DONE] Phase 2 - Configuration settings (`cc4fbb5fa`).
+4. [DONE] Phase 3a - Full cycle: new encoding, read path, background workers (`eba2a8ffd`).
+5. [DONE] INFO compression section, with clear field names; part of Phase 5 (`14df64e73`, `dff9f2e07`).
+6. [DONE] Settings `compression-lfu-threshold` (default 4) and `compression-max-inflight-requests` (`3c9984d93`, `ae54f2844`).
+7. [DONE] Phase 3b - `LOOKUP_NODECOMPRESS` in TYPE, EXISTS, TTL, DUMP, MIGRATE, TOUCH, EXPIRE, PERSIST, RENAME, MOVE, COPY (`bb94041d7`, `71d5069c4`).
+8. [DONE] Phase 3b - Slot migration export checked (plain bytes on the wire), with a cluster test (`f6b792dab`, `d968ec3a4`).
+9. [DONE] Phase 3b - Audit of encoding reads, with fixes F1, F3/F4, F5a, F6 (`fafdd2a67`).
+10. [DONE] Phase 3b - `DEBUG COMPRESS-KEY`, free path stub, tests for keyspace events and object free and size (`a2453fe85`).
+11. [DONE] Phase 5 - Cursor sweeper policy (`compression-sweeper-policy`), `COMPRESSOR_SAMPLES_PER_CRON` 500 (`21033ad76`).
+12. [DONE] Phase 5 - Sweeper backoff, `cursor` only: pause after a pass with less than 1% eligible keys (`compression-sweeper-backoff-seconds`).
+13. [NOT STARTED] Phase 5 - Benchmark `cursor` and `random`, then choose the default and `COMPRESSOR_SAMPLES_PER_CRON`.
+14. [NOT STARTED] Phase 5 - Magic-byte skip table for data that is already compressed.
+15. [NOT STARTED] Phase 5 - Check `CLIENT PAUSE WRITE` and replicas, and the missing sweeper tests.
+16. [NOT STARTED] Phase 6 - RDB and AOF persistence: a new RDB type that saves frames as they are.
+17. [NOT STARTED] Phase 7 - Compress on import and on replica apply (no memory spike).
+18. [NOT STARTED] Phase 8 - Measurements.
+19. [NOT STARTED] Phase 9 - Documentation.
+20. [NOT STARTED] Phase 10 - Dictionary registry.
+21. [NOT STARTED] Phase 11 - zstd backend and training.
+22. [NOT STARTED] Separate task - Forkless save support (see the section below).
+23. [NOT STARTED] Idea - Decompress in the I/O thread (off-loading).
+24. [NOT STARTED] Idea - Run the whole test suite with compression on (design doc section 10.1).
 
 ## Phase 0 - Compressor interface and LZ4 backend (DONE, pushed)
 
@@ -355,19 +360,8 @@ compressed, and checks the code paths that do not use `lookupKey()`.
   the backend `release()` call. Note for Phase 10: a free can run on a
   background thread (`FLUSHALL ASYNC`), and each `compressorAlg` instance
   belongs to one thread.
-- Forkless save: remove the startup refusal. Fix first (found in the audit,
-  not reachable today, because compression and forkless can not run
-  together):
-  - `tryCloneDbEntry()` (`bgiteration.c`) copies the frame bytes into a
-    plain string when it clones a value, so the RDB gets frame bytes as the
-    user value. Do not clone compressed values, or clone the plain bytes.
-  - The save thread decompresses with the main-thread compressor and
-    updates non-atomic counters (`rdbSaveStringObject()` on the forkless
-    thread). Use a per-thread compressor, and skip the counters or make them
-    atomic.
-  - A client read (or a module write handle) decompresses in place and frees
-    the frame while the save thread reads it. Treat a value that the
-    forkless thread holds like a child process: give a temporary copy.
+- Forkless save: moved to a separate task, see "Separate task: forkless
+  save support" below.
 - DONE: `DEBUG COMPRESS-KEY <key>`: compresses one key now, on the main
   thread, also when it is not cold (`compressorDebugCompressKey()` in
   `compressor_workers.c`). Same checks as the sweeper except coldness
@@ -418,9 +412,17 @@ Status: PARTLY DONE.
 
 Left:
 
-- Backoff: pause the sweeper when recent checks found almost no eligible
-  keys. With `cursor`: pause after a pass with no eligible key. Count the
-  pauses in `INFO compression`. Tests must not wait for a paused sweeper.
+- DONE: backoff, `cursor` only. At the end of a pass, if less than
+  `COMPRESSOR_BACKOFF_MIN_ELIGIBLE_PCT` (1%) of the checked keys were
+  eligible, pause for `compression-sweeper-backoff-seconds` (0-3600, default
+  60, 0 = off). A pass that checked no key does not pause (importing slots).
+  A change of the setting ends a pause. If the change comes in the middle of
+  a pass, that pass does not start a new pause (it was partial); at the start
+  of a pass (during a pause) the next pass is full and can pause again. INFO: `compression_sweeper_paused`,
+  `compression_total_sweeper_backoffs`. Tests wake the sweeper in
+  `make_cold` (`wake_sweeper`: set 0, then the old value, because CONFIG SET
+  to the same value does not call the apply function). `random` has no
+  backoff.
 - Benchmark `cursor` and `random`, then choose the default policy and
   `COMPRESSOR_SAMPLES_PER_CRON`. Maybe make it a setting
   (`compression-sweep-samples`).
@@ -596,6 +598,26 @@ Goal: default algorithm and trained dictionaries.
   docs.
 - Tests: unit tests for the zstd backend (same matrix as LZ4); Tcl tests for
   first training, retrain, drain of the old dictionary, max versions.
+
+## Separate task: forkless save support (TODO, not scheduled)
+
+Today `compression-mode` can not be used with
+`forkless-infrastructure-enabled yes`: the server refuses to start
+(`compressorConfigCheck()`), and the forkless setting can not change at
+runtime. So the problems below can not happen now. Fix them first, then
+remove the startup refusal. They were found in the audit of Phase 3b:
+
+- `tryCloneDbEntry()` (`bgiteration.c`) copies the frame bytes into a plain
+  string when it clones a value, so the RDB gets frame bytes as the user
+  value. Do not clone compressed values, or clone the plain bytes.
+- The save thread decompresses with the main-thread compressor and updates
+  non-atomic counters (`rdbSaveStringObject()` on the forkless thread). Use
+  a per-thread compressor, and skip the counters or make them atomic.
+- A client read (or a module write handle) decompresses in place and frees
+  the frame while the save thread reads it. Treat a value that the forkless
+  thread holds like a child process: give a temporary copy.
+- Tests: a forkless BGSAVE of compressed values, with reads and writes on
+  the same keys during the save; `DEBUG RELOAD` gives the same values.
 
 ## Off-loading: decompress in the I/O thread (IDEA, not scheduled)
 

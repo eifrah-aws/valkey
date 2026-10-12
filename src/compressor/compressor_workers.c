@@ -303,6 +303,14 @@ static int sweep_dbid = 0;
 static unsigned long long sweep_cursor = 0;
 static unsigned int sweep_bucket_done = 0;
 
+/* The backoff of the cursor policy: the keys checked and the keys eligible in
+ * this pass, whether the pass covers the whole keyspace, and the end of the
+ * pause (monotonic us, 0 when not paused). */
+static unsigned long long sweep_pass_checked = 0;
+static unsigned long long sweep_pass_eligible = 0;
+static bool sweep_pass_full = true;
+static monotime sweep_paused_until = 0;
+
 typedef struct sweepScanData {
     int dbid;
     unsigned int checked;
@@ -327,7 +335,48 @@ static void sweepScanCallback(void *privdata, void *entry, int didx) {
         return;
     }
     data->checked++;
-    if (checkKey(data->dbid, entry)) data->queued++;
+    sweep_pass_checked++;
+    bool queued = checkKey(data->dbid, entry);
+    /* EEXIST: eligible, but already in a job. */
+    if (queued || errno == EEXIST) sweep_pass_eligible++;
+    if (queued) data->queued++;
+}
+
+/* Ends a pass. Starts the backoff pause when almost no key in the pass was
+ * eligible. A pass that checked no key does not pause: during a slot import,
+ * the scan skips the importing slots, and the keys must be compressed soon
+ * after the import. Such a pass is cheap. */
+static void sweepPassDone(void) {
+    compressor_stats.counters.compression_total_sweeper_passes++;
+    bool idle = sweep_pass_full && sweep_pass_checked > 0 &&
+                sweep_pass_eligible * 100 < sweep_pass_checked * COMPRESSOR_BACKOFF_MIN_ELIGIBLE_PCT;
+    if (idle && server.compression_sweeper_backoff_seconds > 0) {
+        sweep_paused_until = getMonotonicUs() + (monotime)server.compression_sweeper_backoff_seconds * 1000000;
+        compressor_stats.counters.compression_total_sweeper_backoffs++;
+    }
+    sweep_pass_checked = 0;
+    sweep_pass_eligible = 0;
+    sweep_pass_full = true;
+}
+
+bool compressorSweeperIsPaused(void) {
+    return server.compression_sweeper_policy == COMPRESSOR_SWEEPER_POLICY_CURSOR && sweep_paused_until != 0 &&
+           getMonotonicUs() < sweep_paused_until;
+}
+
+int compressorSweeperBackoffApply(const char **err) {
+    UNUSED(err);
+    sweep_paused_until = 0;
+    /* A pass that is in progress does not start a pause when it ends. It
+     * already scanned a part of the keyspace before the wake, and a key that
+     * is new there is checked only in the next pass. At the start of a pass
+     * (for example during a pause, which starts when a pass ends) the next
+     * pass covers the whole keyspace, so it stays a full pass. */
+    bool at_pass_start = sweep_dbid == 0 && sweep_cursor == 0 && sweep_bucket_done == 0;
+    sweep_pass_checked = 0;
+    sweep_pass_eligible = 0;
+    if (!at_pass_start) sweep_pass_full = false;
+    return 1;
 }
 
 /* Moves the cursor policy to the start of the next database. After the last
@@ -337,16 +386,20 @@ static void sweepNextDb(void) {
     sweep_bucket_done = 0;
     if (++sweep_dbid < server.dbnum) return;
     sweep_dbid = 0;
-    compressor_stats.counters.compression_total_sweeper_passes++;
+    sweepPassDone();
 }
 
 /* The cursor policy. Each step scans one bucket. kvstoreScan() handles a
  * rehash, FLUSHALL and SWAPDB: at worst a key is checked two times, or waits
  * for the next pass. Returns the number of jobs queued. */
 static int sweepCursor(void) {
+    if (compressorSweeperIsPaused()) return 0;
+    /* The pause is over, or there was none. sweepPassDone() can start a new
+     * one in this call, and then the loop stops. */
+    sweep_paused_until = 0;
     sweepScanData data = {0};
     for (int steps = 0; steps < COMPRESSOR_SAMPLES_PER_CRON && data.checked < COMPRESSOR_SAMPLES_PER_CRON &&
-                        !inflightIsFull();
+                        !inflightIsFull() && sweep_paused_until == 0;
          steps++) {
         serverDb *db = sweep_dbid < server.dbnum ? server.db[sweep_dbid] : NULL;
         if (db == NULL || kvstoreSize(db->keys) == 0) {
