@@ -74,13 +74,17 @@ This distinction creates two recovery profiles. An RDB-format base preserves exi
 
 ## 4. Data leaving Valkey
 
-Data leaving Valkey follows one of two rules. RDB and an RDB-format AOF base preserve the stored representation; client-visible and node-to-node logical interfaces plus command-form AOF files emit uncompressed values. A client read decompresses a compressed value, keeps the plain value in the keyspace, and marks its key hot (§4.2).2). Other outgoing logical interfaces synchronously decompress into a temporary buffer without changing the value stored in the keyspace.
+Data leaving Valkey follows one of two rules. RDB and an RDB-format AOF base preserve the stored representation; client-visible and node-to-node logical interfaces plus command-form AOF files emit uncompressed values. A client read decompresses a compressed value, keeps the plain value in the keyspace, and marks its key hot (§4.2). Other outgoing logical interfaces synchronously decompress into a temporary buffer without changing the value stored in the keyspace.
 
 > **TODO — validate synchronous decompression with measurements:** benchmark latency, throughput, event-loop occupancy, and peak temporary memory for each outgoing path before finalizing the v1 execution model. If the numbers are not acceptable, move decompression off the main thread or introduce bounded incremental work.
 
 ### 4.1 Slot migration export
 
-Slot migration sends uncompressed logical values. If a selected value is compressed, the source synchronously decompresses it for the migration payload and leaves the stored frame unchanged. The destination consequently requires no knowledge of the source algorithm or dictionaries and processes the value through §3.2.
+Slot migration sends uncompressed logical values. The snapshot is written by a forked child (`childSnapshotForSyncSlot()` -> `rewriteAppendOnlyFileRio()`), as `SET` commands. `rioWriteBulkObject()` decompresses each compressed value into a temporary buffer, so the parent's memory and the stored frame do not change. After the snapshot, the stream carries client writes, which are plain. The destination consequently requires no knowledge of the source algorithm or dictionaries and processes the value through section 3.2. This works with any target version.
+
+Sending frames as they are, to save bandwidth, needs two more things. First, the target must say that it can read frames before the source forks the snapshot. `CLUSTER SYNCSLOTS CAPA` is a one-way message and can arrive after the fork, so one option is a `+OK frames` reply to `ESTABLISH` (an old source accepts any reply that does not start with `-`). Second, the snapshot is a list of AOF commands, so a frame needs `RESTORE` with the RDB type of section 3.3.
+
+A key with a TTL is sent as `SET` and then `PEXPIREAT`. On the target, the `PEXPIREAT` touches the key and raises its LFU counter, so the key arrives hot and waits until the counter decays (about one minute per step). Compression on import (section 3.2) removes this wait.
 
 > **TODO — back the wire-format decision with numbers:** compare migration duration, network bytes, source CPU, main-thread stall time, and destination memory for plaintext transfer versus a compression-aware protocol.
 
@@ -150,7 +154,7 @@ Retraining is triggered by drift: when the live compression ratio gets clearly w
 
 ### 6.1 Choosing a value
 
-On each `compressionCron()` call, the sweeper first checks `compression-max-inflight-requests`. An in-flight request remains counted from enqueue until the main thread installs or discards its result, including queued, running, and completed-but-not-drained jobs. If the in-flight count has reached `compression-max-inflight-requests`, 100 by default, the sweeper does not sample.
+On each `compressorCron()` call, the sweeper first checks `compression-max-inflight-requests`. An in-flight request remains counted from enqueue until the main thread installs or discards its result, including queued, running, and completed-but-not-drained jobs. If the in-flight count has reached `compression-max-inflight-requests`, 100 by default, the sweeper does not sample.
 
 When capacity exists, the sweeper picks keys with one of two policies, set by `compression-sweeper-policy`: `cursor` (the default) or `random`. Both look at no more than `compression-sweeper-samples` keys per cron call, 500 by default. The default is not final. It will be set after a benchmark. It is a separate setting from `compression-max-inflight-requests`, so a large in-flight cap does not add work to one cron call. `random` reads the samples in batches of `COMPRESSOR_SWEEPER_SAMPLE_BATCH` (128), so its array on the stack does not grow with the setting. The policy can change at runtime. The cursor keeps its place when the policy changes.
 
@@ -164,7 +168,7 @@ When capacity exists, the sweeper picks keys with one of two policies, set by `c
 
 The sweeper reads each sampled database entry directly. Sampling must not perform a normal key lookup, refresh LRU/LFU metadata, or add the key to the hot-key LRU. Candidate discovery is not a client access.
 
-A sampled value is cold according to the access metadata selected by the maxmemory policy. In LFU mode, the sweeper applies normal LFU decay and accepts a frequency at or below `compression-lfu-threshold`, 4 by default. A new key starts at 5 (`LFU_INIT_VAL`), so it is hot after it is written. With the default `lfu-decay-time` of 1, the counter decays to 4 within one minute, like the 60-second idle test in LRU mode. With `lfu-decay-time 0`, the counter never decays, and a new key is never compressed, unless `compression-lfu-threshold` is 5 or more. In LRU and `noeviction` modes, it accepts an idle time at or above `compression-min-idle-seconds`, 60 seconds by default. The object's 24-bit field stores one of these forms, so the sweeper never applies both tests.
+A sampled value is cold according to the access metadata selected by the maxmemory policy. In LFU mode, the sweeper applies normal LFU decay and accepts a frequency at or below `compression-lfu-threshold`, 4 by default. A new key starts at 5 (`LFU_INIT_VAL`), so it is hot after it is written. With the default `lfu-decay-time` of 1, the counter decays to 4 within one minute, like the 60-second idle test in LRU mode. With `lfu-decay-time 0`, the counter never decays, and a new key is never compressed, unless `compression-lfu-threshold` is 5 or more. In LRU and `noeviction` modes, it accepts an idle time at or above `COMPRESSOR_MIN_IDLE_SECONDS`, 60 seconds (a fixed value in v1, section 9). The object's 24-bit field stores one of these forms, so the sweeper never applies both tests.
 
 After the coldness test, the sweeper takes a value only if a compression backend is active and the value is `OBJ_STRING`, `OBJ_ENCODING_RAW`, sole-owner (`refcount == 1`), within the size limits, and absent from the internal hot-key LRU (§7.3). The hot-key LRU is an independent first-line exclusion: it blocks recently read keys before object metadata is evaluated, while the policy-specific coldness gate remains a fallback if that bounded LRU evicts an entry. Compressing a hot key would waste worker CPU and make its next read pay synchronous decompression again.
 
@@ -220,7 +224,7 @@ A benchmark with about 1M keys (`random`, 100 samples per call for most of the r
 **Next steps.**
 - Backoff: done for `cursor` (section 6.1): pause after a pass in which less than 1% of the checked keys were eligible. This removes most of the waste when the data is stable. `random` has no backoff.
 - Hot-key LRU expiry (section 7.3, Phase 4): when a key leaves the hot-key list after 60 s, it is a good candidate to compress again. The sweeper can check these keys first, in place of a full search.
-- Measure both policies, then choose the defaults of `compression-sweeper-policy` and `compression-sweeper-samples`.
+- Measure both policies, then choose the defaults of `compression-sweeper-policy` and `compression-sweeper-samples`. The benchmark (`.agents/bench/compression-bench.sh`, scenarios in `.agents/bench/scenarios.txt`) runs a baseline without compression, then `cursor` with changes to the backoff, the samples, `compression-threads`, `compression-max-inflight-requests` and `--io-threads`, and then `random`. Each scenario loads the data, watches the compression for 10 minutes, and runs GET over 10%, 30%, 50% and 100% of the keys.
 
 ### 6.2 The worker must not race the main thread
 
@@ -234,7 +238,7 @@ Two bug classes become impossible rather than merely audited:
 - **Use-after-free** — `APPEND` frees the old buffer; the worker isn't reading it.
 - **Torn read** — `SETBIT` changes bytes mid-compression; the worker's copy is private.
 
-Cost: one extra memory pass, ~0.1-2 us for typical values. That is **20-40x cheaper than the compression itself**, and paid once per attempt. If a compressed value is later read, the first read decompresses it and keeps the plain value (§7.2), so decompression is also paid only once per cold-to-hot transition.2) ensures that decompression is also paid only once per cold-to-hot transition.
+Cost: one extra memory pass, ~0.1-2 us for typical values. That is **20-40x cheaper than the compression itself**, and paid once per attempt. If a compressed value is later read, the first read decompresses it and keeps the plain value (§7.2), so decompression is also paid only once per cold-to-hot transition.
 
 ### 6.3 Freshness: compare the bytes
 
@@ -286,7 +290,7 @@ Fields deliberately left out:
 
 `max_output_size()` is generous, so the frame is shrunk to its real length after compression. Skipping that leaves unused capacity that the allocator still charges for and makes reported savings exceed real savings.
 
-Finally, a **net-savings guard** compares **allocation sizes**, not string lengths: the memory the frame really uses against the memory the plain value uses (`zmalloc_size`). The allocator rounds each request up to a size class, so a shorter string can still use the same memory (Appendix A). If the frame does not save at least `compression-min-savings-ratio` percent (10), it is dropped. The worker already drops a frame that is not smaller than its input. Incompressible data therefore costs one failed attempt rather than permanent overhead.
+Finally, a **net-savings guard** compares **allocation sizes**, not string lengths: the memory the frame really uses against the memory the plain value uses (`zmalloc_size`). The allocator rounds each request up to a size class, so a shorter string can still use the same memory (Appendix A). If the frame does not save at least `COMPRESSOR_MIN_SAVINGS_PCT` percent (10; a fixed value in v1, section 9), it is dropped. The worker already drops a frame that is not smaller than its input. Incompressible data therefore costs one failed attempt rather than permanent overhead.
 
 Errors are codes, not logs. A frame function sets `compressorAlg.last_error` (for example `COMPRESSOR_ERR_FRAME_VERSION` or `COMPRESSOR_ERR_DICTIONARY_MISMATCH`), and the caller, which knows the key, decides what to log and count.
 
@@ -396,7 +400,7 @@ A failure returns 0, and the code goes into `instance->last_error`. `compressorS
 
 The backend used for **new compression** is selected at startup from `compression-mode` (§9). Persisted frames may outlive the process that created them, so each frame records its algorithm and format version, and each loaded dictionary is associated with that algorithm (§6.4). The process must retain decoder contexts for every algorithm present in the loaded RDB even when new compression is disabled or configured to use another backend.
 
-The second backend (LZ4) is operator-selectable at startup, because `compression-mode` names the algorithm. `zstd` stays the default and the recommended value: dictionary support is what makes small values compress well, and LZ4's dictionary support is weaker. The honest summary for the config docs is that `lz4` trades ratio for speed, and the gap is widest exactly where this feature aims — values of a few hundred bytes. Note that LZ4 is already vendored in `deps/lz4`. zstd is not vendored, but Valkey can already link it as an optional system library (`BUILD_ZSTD`, default `no`), used by `src/compression_zstd.c`. The zstd backend should use that. Open question: the default mode `zstd` would then need `BUILD_ZSTD=yes`.
+The second backend (LZ4) is operator-selectable at startup, because `compression-mode` names the algorithm. `zstd` is the recommended value (the default of `compression-mode` is `off`): dictionary support is what makes small values compress well, and LZ4's dictionary support is weaker. The honest summary for the config docs is that `lz4` trades ratio for speed, and the gap is widest exactly where this feature aims — values of a few hundred bytes. Note that LZ4 is already vendored in `deps/lz4`. zstd is not vendored, but Valkey can already link it as an optional system library (`BUILD_ZSTD`, default `no`), used by `src/compression_zstd.c`. The zstd backend should use that. Open question: the default mode `zstd` would then need `BUILD_ZSTD=yes`.
 
 ---
 
@@ -438,6 +442,7 @@ None of these are configurable in v1. The mechanisms behind them run with the fi
 | `compression-min-savings-ratio` | percent | `10` | Net-savings guard. Below this, the frame is thrown away. | No |
 | `compression-min-idle-seconds` | seconds | `60` | Coldness gate in LRU and noeviction modes, and hot-key LRU entry lifetime in every mode. | No |
 | `compression-hot-key-lru-max-entries` | entries | `100000` | Maximum recently read keys excluded from background compression (§7.3). | No |
+| `compression-sweeper-backoff-min-eligible-pct` | percent | `1` | With `cursor`, a pass below this share of eligible keys starts the backoff (`COMPRESSOR_BACKOFF_MIN_ELIGIBLE_PCT`, section 6.1). | No |
 | `compression-dict-min-training-keys` | int | `1000` | First training fires at this key count, and needs this many samples. | No |
 | `compression-dict-max-training-keys` | int | `10000` | Sample cap for one training scan. | No |
 | `compression-training-buffer-size` | bytes | `16777216` (16 MiB) | Sample buffer, allocated in full per scan and freed after it. | No |
