@@ -30,16 +30,15 @@ Branch `valkey-inline-compression` (fork `eifrah-aws/valkey`). Design: `design-d
 
 1. Set the defaults from the benchmark: keep `cursor` with 500 samples, and raise max in-flight jobs from 100 to 1000.
 2. Design a lower read cost: decompress in the I/O threads, or keep the frame on a read of a cold key.
-3. Measure RSS with active defrag, because partial compression lowers `used_memory` but not RSS.
-4. Skip values that are already compressed (PNG, JPEG, gzip, ...) by their first bytes.
-5. Check the sweeper with `CLIENT PAUSE WRITE` and on replicas, and add the missing sweeper tests.
-6. Save and load frames as they are in RDB and the AOF preamble (new RDB type).
-7. Compress values on slot-migration import and on replica apply, to avoid a memory spike.
-8. Run the full measurements of the design TODOs.
-9. Write the user documentation (`valkey.conf`, INFO fields).
-10. Add the compression dictionary registry, for better ratios on small values.
-11. Add the zstd backend and dictionary training.
-12. Support forkless save, after fixing the three problems the audit found.
+3. Skip values that are already compressed (PNG, JPEG, gzip, ...) by their first bytes.
+4. Check the sweeper with `CLIENT PAUSE WRITE` and on replicas, and add the missing sweeper tests.
+5. Save and load frames as they are in RDB and the AOF preamble (new RDB type).
+6. Compress values on slot-migration import and on replica apply, to avoid a memory spike.
+7. Run the full measurements of the design TODOs.
+8. Write the user documentation (`valkey.conf`, INFO fields), and recommend `activedefrag yes` with compression, so RSS follows `used_memory`.
+9. Add the compression dictionary registry, for better ratios on small values.
+10. Add the zstd backend and dictionary training.
+11. Support forkless save, after fixing the three problems the audit found.
 
 <div style="page-break-after: always;"></div>
 
@@ -59,8 +58,9 @@ Branch `valkey-inline-compression` (fork `eifrah-aws/valkey`). Design: `design-d
 t99: seconds after the load until 99% of the 1,000,000 values are compressed (600 s window).
 
 **Results.**
-- **Memory:** -50.8% `used_memory` (2.17 -> 1.07 GiB), and RSS follows (2.47 -> 1.13 GiB) when all values are compressed. With 49% or 90% compressed, RSS stays at 2.52 GiB or 2.07 GiB, because freed values leave holes in pages; active defrag was off in all runs.
+- **Memory:** -50.8% `used_memory` (2.17 -> 1.07 GiB), and RSS follows (2.47 -> 1.13 GiB) when all values are compressed. With 49% or 90% compressed, RSS stays at 2.52 GiB or 2.07 GiB, because freed values leave holes in pages (active defrag off).
 - **Sweeper:** `cursor` compresses 99% in 362 s with 2,800,451 checks; `random` needs 11,802,752 checks for 99% (2000 samples) and reaches only 89.7% with 500 samples. The workers use 4.43 s of CPU for 1M values, and the sweeper 9.01 s of main-thread CPU in 600 s. A limit of 100 in-flight jobs halves the speed.
 - **SET** is not affected: 883,023 rps and p99 3.023 ms against 892,003 rps and 2.959 ms.
 - **GET** pays for each first read of a compressed key: with all keys read (597,825 decompressions), p99 is 2.831 ms against 0.457 ms. With 2000 samples, keys are compressed again between the runs (883,750 decompressions), p99 is 10.559 ms, and the rate drops to 95,738 rps. A full read brings memory back to 2.17 GiB.
-- **Baselines are noisy** (GET p99 with all keys: 0.457, 1.055 and 0.943 ms for io-threads 12, 6 and 24), so differences below about 1 ms need repeated runs.
+- **Active defrag** (second run, 1200 s watch, `bench/RESULTS-2026-10-18-defrag.md`) fixes RSS with partial compression: `cursor-if100-defrag` at 603 s has 511,499 values compressed, `used_memory` 1.60 GiB and RSS 1.82 GiB, against 2.52 GiB RSS without defrag. After the full read, RSS ends at 2.29 GiB and 2.28 GiB, against 2.30 GiB for the baseline (3.21, 3.14 and 2.87 GiB without defrag). Main-thread CPU in the 1200 s watch is 18.00 s (`cursor-if100-defrag`) and 11.67 s (`cursor-ct4-defrag`), against 4.65 s for the baseline.
+- **Baselines are noisy** (GET p99 with all keys: 0.457, 1.055 and 0.943 ms for io-threads 12, 6 and 24, and 1.375 ms for the baseline with defrag, which did no defrag work), so differences below about 1 ms need repeated runs.

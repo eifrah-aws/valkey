@@ -223,7 +223,7 @@ run_sb() {
 }
 
 # CSV header and one row of the compression watch.
-WATCH_FIELDS="compressed_values compressed_values_original_bytes compressed_values_bytes compression_saved_bytes compression_jobs_in_flight compression_sweeper_paused compression_temporary_copies compression_total_keys_checked compression_total_keys_eligible compression_total_keys_skipped_already_compressed compression_total_keys_skipped_not_string compression_total_keys_skipped_in_use compression_total_keys_skipped_size compression_total_keys_skipped_hot compression_total_keys_skipped_already_queued compression_total_jobs_queued compression_total_values_compressed compression_total_values_dropped compression_total_sweeper_passes compression_total_sweeper_backoffs compression_total_compression_time_us compression_total_values_decompressed compression_total_decompression_time_us used_memory used_memory_rss used_cpu_sys used_cpu_user used_cpu_sys_main_thread used_cpu_user_main_thread"
+WATCH_FIELDS="compressed_values compressed_values_original_bytes compressed_values_bytes compression_saved_bytes compression_jobs_in_flight compression_sweeper_paused compression_temporary_copies compression_total_keys_checked compression_total_keys_eligible compression_total_keys_skipped_already_compressed compression_total_keys_skipped_not_string compression_total_keys_skipped_in_use compression_total_keys_skipped_size compression_total_keys_skipped_hot compression_total_keys_skipped_already_queued compression_total_jobs_queued compression_total_values_compressed compression_total_values_dropped compression_total_sweeper_passes compression_total_sweeper_backoffs compression_total_compression_time_us compression_total_values_decompressed compression_total_decompression_time_us used_memory used_memory_rss mem_fragmentation_ratio allocator_frag_ratio allocator_frag_bytes active_defrag_running active_defrag_hits active_defrag_misses active_defrag_key_hits active_defrag_key_misses total_active_defrag_time used_cpu_sys used_cpu_user used_cpu_sys_main_thread used_cpu_user_main_thread"
 
 watch_header() {
     echo "elapsed_s $WATCH_FIELDS" | tr ' ' ','
@@ -389,7 +389,9 @@ head = ["scenario", "set_rps", "set_p50_ms", "set_p99_ms", "set_p999_ms",
         "main_thread_cpu_s_during_watch", "total_cpu_s_during_watch", "compression_time_s"]
 for t in touches:
     head += ["get%s_rps" % t, "get%s_p50_ms" % t, "get%s_p99_ms" % t, "get%s_p999_ms" % t, "get%s_hits" % t]
-head += ["values_decompressed_by_gets", "used_memory_end"]
+head += ["values_decompressed_by_gets", "used_memory_end",
+         "rss_after_set", "rss_after_watch", "rss_end", "frag_ratio_after_watch", "frag_ratio_end",
+         "defrag_hits_during_watch", "defrag_time_ms_during_watch", "defrag_hits_total", "defrag_time_ms_total"]
 
 with open(os.path.join(run_dir, "summary.csv"), "w", newline="") as fh:
     w = csv.writer(fh)
@@ -422,6 +424,10 @@ with open(os.path.join(run_dir, "summary.csv"), "w", newline="") as fh:
         e = info(os.path.join(d, "info-after-get-touch-%s.txt" % touches[-1])) if touches else {}
         dec_a, dec_e = num(b, "compression_total_values_decompressed"), num(e, "compression_total_values_decompressed")
         row += ["" if dec_a is None or dec_e is None else int(dec_e - dec_a), e.get("used_memory", "")]
+        row += [a.get("used_memory_rss", ""), b.get("used_memory_rss", ""), e.get("used_memory_rss", ""),
+                b.get("mem_fragmentation_ratio", ""), e.get("mem_fragmentation_ratio", ""),
+                delta("active_defrag_hits"), delta("total_active_defrag_time"),
+                e.get("active_defrag_hits", ""), e.get("total_active_defrag_time", "")]
         w.writerow(row)
 PY
 log "Done. Summary: $RUN_DIR/summary.csv"

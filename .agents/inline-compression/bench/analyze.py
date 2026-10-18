@@ -59,7 +59,25 @@ def scenarios(run_dir):
     return out
 
 
+def io_threads(start):
+    args = start.split()
+    return args[args.index("--io-threads") + 1] if "--io-threads" in args else "1"
+
+
+def baseline_name(data, start=None):
+    """The scenario without compression to compare with: the first one, or
+    the first one with the same --io-threads as start."""
+    offs = [n for n, v in data.items() if not v["compressed"]]
+    if start is not None:
+        same = [n for n in offs if io_threads(data[n]["start"]) == io_threads(start)]
+        if same:
+            return same[0]
+    return offs[0]
+
+
 def main(run_dir, md_path=None):
+    global RUN_DIR
+    RUN_DIR = run_dir
     summary = {r["scenario"]: r for r in csv.DictReader(open(os.path.join(run_dir, "summary.csv")))}
     data = {}
 
@@ -78,8 +96,9 @@ def main(run_dir, md_path=None):
         if compressed:
             ct = start.split("--compression-threads")[1].split()[0]
             check(i_start["compression_threads"] == ct, f"{name}: wrong compression_threads")
-        check(i_start.get("redis_git_sha1", "") == open(os.path.join(run_dir, "baseline-off", "info-start.txt")).read().split("redis_git_sha1:")[1].split()[0],
-              f"{name}: a different build than the baseline")
+        first = scenarios(run_dir)[0][0]
+        check(i_start.get("redis_git_sha1", "") == info(os.path.join(run_dir, first, "info-start.txt")).get("redis_git_sha1", ""),
+              f"{name}: a different build than the first scenario")
 
         # sb reports: all requests ran, with the right options.
         s = json.load(open(os.path.join(d, "set.json")))
@@ -99,7 +118,8 @@ def main(run_dir, md_path=None):
         b = info(os.path.join(d, "info-after-watch.txt"))
         e = info(os.path.join(d, "info-after-get-touch-100.txt"))
         rows = list(csv.DictReader(open(os.path.join(d, "compression.csv"))))
-        check(int(rows[-1]["elapsed_s"]) >= WATCH_SECONDS, f"{name}: the watch was shorter than {WATCH_SECONDS} s")
+        check(int(rows[-1]["elapsed_s"]) >= planned_watch_seconds(),
+              f"{name}: the watch was shorter than {planned_watch_seconds()} s")
 
         if compressed:
             # The policy ran: only cursor counts passes.
@@ -187,7 +207,7 @@ def main(run_dir, md_path=None):
 
 
 def report(data, best):
-    base = data["baseline-off"]
+    base = data[baseline_name(data)]
     base_mem = num(base["a"], "used_memory")
     print(f"Best compressed_values in the run: {best}")
     print()
@@ -207,15 +227,14 @@ def report(data, best):
                     num(v["a"], "used_cpu_sys_main_thread") - num(v["a"], "used_cpu_user_main_thread"))
         worker = float(b.get("compression_total_compression_time_us", 0)) / 1e6
         dec = float(e.get("compression_total_values_decompressed", 0)) - float(b.get("compression_total_values_decompressed", 0))
-        print(f"{name:20} {mem / 1e9:13.2f}GB {100 * (mem - base_mem) / base_mem:7.1f}% {num(e, 'used_memory') / 1e9:6.2f}GB "
+        print(f"{name:20} {mem / 1024 ** 3:12.2f}GiB {100 * (mem - base_mem) / base_mem:7.1f}% {num(e, 'used_memory') / 1024 ** 3:5.2f}GiB "
               f"{t(50):>5} {t(90):>5} {t(99):>5} {b.get('compression_total_keys_checked', '0'):>9} {main_cpu:8.2f} "
               f"{worker:8.2f} {int(dec):>10}")
     print()
     print("SET rps / p99 ms, and GET p99 / p999 ms (ratio of p99 to the baseline with the same io-threads)")
     print(f"{'scenario':20} {'SET rps':>8} {'p99':>6}  " + "  ".join(f"{'GET ' + t + '%':>22}" for t in TOUCHES))
     for name, v in data.items():
-        io = v["start"].split("--io-threads")[1].split()[0]
-        ref = {"12": "baseline-off", "6": "baseline-off-io6", "24": "baseline-off-io24"}[io]
+        ref = baseline_name(data, v["start"])
         cells = []
         for t in TOUCHES:
             lat = v["gets"][t]["latency_ms"]
@@ -227,6 +246,8 @@ def report(data, best):
     # Run-to-run spread: these scenarios change only things that should not
     # change the GET path much, so their spread shows the noise.
     same = [n for n in ["cursor-base", "cursor-ct16", "cursor-if10000", "cursor-io24"] if n in data]
+    if len(same) < 2:
+        return
     print()
     for t in TOUCHES:
         vals = [data[n]["gets"][t]["latency_ms"]["p99"] for n in same]
@@ -258,6 +279,22 @@ def md_table(head, rows):
     return "\n".join(out)
 
 
+RUN_DIR = None
+
+
+def planned_watch_seconds():
+    """The -w / --watch-seconds value of the run, from command.txt, or the
+    script default (600)."""
+    try:
+        args = open(os.path.join(RUN_DIR, "command.txt")).read().split()
+    except (OSError, TypeError):
+        return WATCH_SECONDS
+    for opt in ("-w", "--watch-seconds"):
+        if opt in args and args.index(opt) + 1 < len(args):
+            return int(args[args.index(opt) + 1])
+    return WATCH_SECONDS
+
+
 def markdown_tables(data, best):
     names = list(data)
     parts = []
@@ -273,22 +310,34 @@ def markdown_tables(data, best):
             if int(r["compressed_values"]) >= best * p / 100:
                 return r["elapsed_s"]
         return "-"
-    base_mem = num(data["baseline-off"]["a"], "used_memory")
+    base = baseline_name(data)
+    watch_s = planned_watch_seconds()
+    base_mem = num(data[base]["a"], "used_memory")
+    base_rss = num(data[base]["a"], "used_memory_rss")
     rows = []
     for n in names:
         a, b, e = data[n]["a"], data[n]["b"], data[n]["e"]
         mem = num(b, "used_memory")
+        rss = num(b, "used_memory_rss")
         rows.append([f"`{n}`", gib(a["used_memory"]), gib(b["used_memory"]), f"{100 * (mem - base_mem) / base_mem:.1f}%",
-                     b.get("compressed_values", "0"), gib(b.get("compressed_values_original_bytes", 0)),
-                     gib(b.get("compressed_values_bytes", 0)), gib(b.get("compression_saved_bytes", 0)),
-                     gib(e["used_memory"])])
+                     gib(a["used_memory_rss"]), gib(b["used_memory_rss"]), f"{100 * (rss - base_rss) / base_rss:.1f}%",
+                     b["mem_fragmentation_ratio"], b.get("compressed_values", "0"),
+                     gib(b.get("compressed_values_original_bytes", 0)), gib(b.get("compressed_values_bytes", 0)),
+                     gib(b.get("compression_saved_bytes", 0)), gib(e["used_memory"]), gib(e["used_memory_rss"]),
+                     e["mem_fragmentation_ratio"]])
+    defrag = [n for n in names if "--activedefrag yes" in data[n]["start"]]
+    defrag_note = ("`activedefrag` was off in all runs." if not defrag else
+                   "`activedefrag` was on in: " + ", ".join(f"`{n}`" for n in defrag) + ".")
     parts.append("### Memory\n\nIn GiB (1 GiB = 1024^3 bytes, the unit of INFO `used_memory_human`). `used_memory` "
-                 "after the SET load, after the 10-minute watch, and at the end (after the 4 GET runs). The change "
-                 "is against `baseline-off` after SET, computed from the bytes. The `compressed_*` columns are "
-                 "after the watch.\n")
-    parts.append(md_table(["Scenario", "used_memory after SET", "used_memory after watch", "change",
+                 f"and `used_memory_rss` after the SET load, after the {watch_s} s watch, and at the end (after the "
+                 f"GET runs). The changes are against `{base}` after SET, computed from the bytes. "
+                 "`mem_fragmentation_ratio` is RSS / used_memory, from INFO. The `compressed_*` columns are after "
+                 f"the watch. {defrag_note}\n")
+    parts.append(md_table(["Scenario", "used_memory after SET", "used_memory after watch", "used_memory change",
+                           "RSS after SET", "RSS after watch", "RSS change", "fragmentation after watch",
                            "compressed_values", "compressed_values_original_bytes", "compressed_values_bytes",
-                           "compression_saved_bytes", "used_memory at end"], rows))
+                           "compression_saved_bytes", "used_memory at end", "RSS at end",
+                           "fragmentation at end"], rows))
 
     rows = []
     for n in names:
@@ -304,9 +353,9 @@ def markdown_tables(data, best):
                      b.get("compression_total_keys_eligible", "0"), b.get("compression_total_sweeper_passes", "0"),
                      b.get("compression_total_sweeper_backoffs", "0"), f"{main_cpu:.2f}", f"{total_cpu:.2f}",
                      f"{worker:.2f}", dec])
-    parts.append(f"### Sweeper, during the 10-minute watch\n\nt50/t90/t99: seconds after the end of the SET load "
+    parts.append(f"### Sweeper, during the {watch_s} s watch\n\nt50/t90/t99: seconds after the end of the SET load "
                  f"until `compressed_values` reached 50/90/99% of {best} (the best value of the run); \"-\" means "
-                 f"not reached in 600 s. CPU is in seconds, from INFO. The last column counts the decompressions of "
+                 f"not reached in {watch_s} s. CPU is in seconds, from INFO. The last column counts the decompressions of "
                  f"all 4 GET runs.\n")
     parts.append(md_table(["Scenario", "t50 s", "t90 s", "t99 s", "keys_checked", "keys_eligible", "passes",
                            "backoffs", "main-thread CPU s", "total CPU s", "worker compression s",

@@ -1,0 +1,16 @@
+# Scenarios with active defrag, for compression-bench.sh. Same format as
+# scenarios.txt. Each one is a scenario of scenarios.txt plus
+# --activedefrag yes, with the default defrag thresholds (start at 10%
+# fragmentation and 100 MB of waste, 1-25% of a CPU). Run with a longer watch:
+#   ./compression-bench.sh -s scenarios-defrag.txt -w 1200
+
+# The cost of defrag alone, without compression.
+baseline-off-defrag | --io-threads 12 --activedefrag yes |
+
+# Part of the values compressed (49% in 600 s): RSS stayed at 2.52 GiB with
+# fragmentation 1.55. Does defrag get the RSS saving back?
+cursor-if100-defrag | --io-threads 12 --compression-mode lz4 --compression-threads 12 --compression-max-inflight-requests 100 --activedefrag yes | compression-sweeper-policy cursor compression-sweeper-samples 500 compression-sweeper-backoff-seconds 60
+
+# The best configuration so far: what does defrag cost next to the sweeper
+# and the GET runs?
+cursor-ct4-defrag   | --io-threads 12 --compression-mode lz4 --compression-threads 4 --compression-max-inflight-requests 1000 --activedefrag yes | compression-sweeper-policy cursor compression-sweeper-samples 500 compression-sweeper-backoff-seconds 60
