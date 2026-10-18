@@ -1,0 +1,28 @@
+# Scenarios for compression-bench.sh. One per line:
+#   name | startup arguments | runtime settings (name value ...)
+# The script always adds: --save '' --protected-mode no --maxmemory-policy allkeys-lfu
+# Each group changes one thing from its base. The run order is the file order.
+
+# 1. Baseline: no compression.
+baseline-off       | --io-threads 12 |
+
+# 2. cursor. Base: io-threads 12, compression-threads 12, in-flight 1000,
+#    samples 500, backoff 60.
+cursor-base        | --io-threads 12 --compression-mode lz4 --compression-threads 12 --compression-max-inflight-requests 1000 | compression-sweeper-policy cursor compression-sweeper-samples 500 compression-sweeper-backoff-seconds 60
+cursor-backoff0    | --io-threads 12 --compression-mode lz4 --compression-threads 12 --compression-max-inflight-requests 1000 | compression-sweeper-policy cursor compression-sweeper-samples 500 compression-sweeper-backoff-seconds 0
+cursor-samples100  | --io-threads 12 --compression-mode lz4 --compression-threads 12 --compression-max-inflight-requests 1000 | compression-sweeper-policy cursor compression-sweeper-samples 100 compression-sweeper-backoff-seconds 60
+cursor-samples2000 | --io-threads 12 --compression-mode lz4 --compression-threads 12 --compression-max-inflight-requests 1000 | compression-sweeper-policy cursor compression-sweeper-samples 2000 compression-sweeper-backoff-seconds 60
+cursor-ct4         | --io-threads 12 --compression-mode lz4 --compression-threads 4 --compression-max-inflight-requests 1000 | compression-sweeper-policy cursor compression-sweeper-samples 500 compression-sweeper-backoff-seconds 60
+cursor-ct16        | --io-threads 12 --compression-mode lz4 --compression-threads 16 --compression-max-inflight-requests 1000 | compression-sweeper-policy cursor compression-sweeper-samples 500 compression-sweeper-backoff-seconds 60
+cursor-if100       | --io-threads 12 --compression-mode lz4 --compression-threads 12 --compression-max-inflight-requests 100 | compression-sweeper-policy cursor compression-sweeper-samples 500 compression-sweeper-backoff-seconds 60
+cursor-if10000     | --io-threads 12 --compression-mode lz4 --compression-threads 12 --compression-max-inflight-requests 10000 | compression-sweeper-policy cursor compression-sweeper-samples 500 compression-sweeper-backoff-seconds 60
+
+# 3. io-threads: each with its own baseline, so RPS and latency compare fairly.
+baseline-off-io6   | --io-threads 6 |
+cursor-io6         | --io-threads 6 --compression-mode lz4 --compression-threads 12 --compression-max-inflight-requests 1000 | compression-sweeper-policy cursor compression-sweeper-samples 500 compression-sweeper-backoff-seconds 60
+baseline-off-io24  | --io-threads 24 |
+cursor-io24        | --io-threads 24 --compression-mode lz4 --compression-threads 12 --compression-max-inflight-requests 1000 | compression-sweeper-policy cursor compression-sweeper-samples 500 compression-sweeper-backoff-seconds 60
+
+# 4. random.
+random-base        | --io-threads 12 --compression-mode lz4 --compression-threads 12 --compression-max-inflight-requests 1000 | compression-sweeper-policy random compression-sweeper-samples 500
+random-samples2000 | --io-threads 12 --compression-mode lz4 --compression-threads 12 --compression-max-inflight-requests 1000 | compression-sweeper-policy random compression-sweeper-samples 2000
