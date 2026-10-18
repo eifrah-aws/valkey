@@ -277,15 +277,17 @@ static bool inflightIsFull(void) {
 /* The random policy. total is the number of keys in all databases, and must
  * not be 0. Returns the number of jobs queued. */
 static int sweepRandom(unsigned long long total) {
-    void *samples[COMPRESSOR_SAMPLES_PER_CRON];
+    void *samples[COMPRESSOR_SWEEPER_SAMPLE_BATCH];
+    unsigned int limit = (unsigned int)server.compression_sweeper_samples;
     unsigned int sampled = 0;
     int queued = 0;
-    while (sampled < COMPRESSOR_SAMPLES_PER_CRON && !inflightIsFull()) {
+    while (sampled < limit && !inflightIsFull()) {
         serverDb *db = pickDb(total);
         if (db == NULL) break;
         int didx = kvstoreGetFairRandomHashtableIndex(db->keys);
-        unsigned int n =
-            kvstoreHashtableSampleEntries(db->keys, didx, samples, COMPRESSOR_SAMPLES_PER_CRON - sampled);
+        unsigned int want = limit - sampled;
+        if (want > COMPRESSOR_SWEEPER_SAMPLE_BATCH) want = COMPRESSOR_SWEEPER_SAMPLE_BATCH;
+        unsigned int n = kvstoreHashtableSampleEntries(db->keys, didx, samples, want);
         if (n == 0) break;
         sampled += n;
         for (unsigned int i = 0; i < n && !inflightIsFull(); i++) {
@@ -312,6 +314,7 @@ static bool sweep_pass_full = true;
 static monotime sweep_paused_until = 0;
 
 typedef struct sweepScanData {
+    unsigned int limit; /* compression-sweeper-samples, read once per call */
     int dbid;
     unsigned int checked;
     int queued;
@@ -323,13 +326,13 @@ typedef struct sweepScanData {
 /* The scan gives the callback all keys of a bucket, with its chain, and can
  * not stop in the middle. So the callback skips the keys that an earlier call
  * handled, and stops checking at the key limit or when the in-flight limit is
- * full. One cron call therefore checks at most COMPRESSOR_SAMPLES_PER_CRON
+ * full. One cron call therefore checks at most compression-sweeper-samples
  * keys. For the other keys, the callback only compares two counters. */
 static void sweepScanCallback(void *privdata, void *entry, int didx) {
     UNUSED(didx);
     sweepScanData *data = privdata;
     if (data->seen++ < data->skip || data->stopped) return;
-    if (data->checked >= COMPRESSOR_SAMPLES_PER_CRON || inflightIsFull()) {
+    if (data->checked >= data->limit || inflightIsFull()) {
         data->stopped = true;
         sweep_bucket_done = data->seen - 1;
         return;
@@ -398,8 +401,9 @@ static int sweepCursor(void) {
      * one in this call, and then the loop stops. */
     sweep_paused_until = 0;
     sweepScanData data = {0};
-    for (int steps = 0; steps < COMPRESSOR_SAMPLES_PER_CRON && data.checked < COMPRESSOR_SAMPLES_PER_CRON &&
-                        !inflightIsFull() && sweep_paused_until == 0;
+    data.limit = (unsigned int)server.compression_sweeper_samples;
+    for (unsigned int steps = 0; steps < data.limit && data.checked < data.limit &&
+                                 !inflightIsFull() && sweep_paused_until == 0;
          steps++) {
         serverDb *db = sweep_dbid < server.dbnum ? server.db[sweep_dbid] : NULL;
         if (db == NULL || kvstoreSize(db->keys) == 0) {
@@ -440,7 +444,7 @@ int compressorCron(void) {
     }
     if (total == 0) return 0;
 
-    /* Both policies look at no more than COMPRESSOR_SAMPLES_PER_CRON keys per
+    /* Both policies look at no more than compression-sweeper-samples keys per
      * call, and stop when compression-max-inflight-requests jobs are in
      * flight. */
     if (server.compression_sweeper_policy == COMPRESSOR_SWEEPER_POLICY_CURSOR) return sweepCursor();

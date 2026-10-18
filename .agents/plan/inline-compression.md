@@ -32,7 +32,7 @@ done. `[NOT STARTED]` means no work has started.
 10. [DONE] Phase 3b - `DEBUG COMPRESS-KEY`, free path stub, tests for keyspace events and object free and size (`a2453fe85`).
 11. [DONE] Phase 5 - Cursor sweeper policy (`compression-sweeper-policy`), `COMPRESSOR_SAMPLES_PER_CRON` 500 (`21033ad76`).
 12. [DONE] Phase 5 - Sweeper backoff, `cursor` only: pause after a pass with less than 1% eligible keys (`compression-sweeper-backoff-seconds`).
-13. [NOT STARTED] Phase 5 - Benchmark `cursor` and `random`, then choose the default and `COMPRESSOR_SAMPLES_PER_CRON`.
+13. [WIP] Phase 5 - Benchmark `cursor` and `random`, then choose the defaults. Done: `compression-sweeper-samples` is now a setting (was `COMPRESSOR_SAMPLES_PER_CRON`). Left: the benchmark script and the runs.
 14. [NOT STARTED] Phase 5 - Magic-byte skip table for data that is already compressed.
 15. [NOT STARTED] Phase 5 - Check `CLIENT PAUSE WRITE` and replicas, and the missing sweeper tests.
 16. [NOT STARTED] Phase 6 - RDB and AOF persistence: a new RDB type that saves frames as they are.
@@ -423,9 +423,12 @@ Left:
   `make_cold` (`wake_sweeper`: set 0, then the old value, because CONFIG SET
   to the same value does not call the apply function). `random` has no
   backoff.
-- Benchmark `cursor` and `random`, then choose the default policy and
-  `COMPRESSOR_SAMPLES_PER_CRON`. Maybe make it a setting
-  (`compression-sweep-samples`).
+- Benchmark `cursor` and `random`, then choose the defaults of
+  `compression-sweeper-policy` and `compression-sweeper-samples`.
+- DONE: `compression-sweeper-samples` (1-10000, default 500, runtime) in
+  place of the constant `COMPRESSOR_SAMPLES_PER_CRON`. `random` samples in
+  batches of `COMPRESSOR_SWEEPER_SAMPLE_BATCH` (128), so its stack array does
+  not grow with the setting.
 - Open: use the hot-key LRU expiry (Phase 4) as a list of keys to check
   first, in place of a full search (design section 6.1.1).
 - Magic-byte skip table (design section 6.1). A `memcmp` on the first bytes

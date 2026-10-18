@@ -20,6 +20,7 @@ start_server {tags {"compression external:skip"}} {
         assert_equal {compression-lfu-threshold 4} [r config get compression-lfu-threshold]
         assert_equal {compression-sweeper-policy cursor} [r config get compression-sweeper-policy]
         assert_equal {compression-sweeper-backoff-seconds 60} [r config get compression-sweeper-backoff-seconds]
+        assert_equal {compression-sweeper-samples 500} [r config get compression-sweeper-samples]
     }
 
     test {Startup-only compression settings can not be changed} {
@@ -71,6 +72,16 @@ start_server {tags {"compression external:skip"}} {
         assert_error "*argument(s) must be one of the following*" {r config set compression-sweeper-policy lru}
         assert_equal {compression-sweeper-policy random} [r config get compression-sweeper-policy]
         r config set compression-sweeper-policy cursor
+    }
+
+    test {compression-sweeper-samples can be changed at runtime and has limits} {
+        r config set compression-sweeper-samples 1
+        assert_equal {compression-sweeper-samples 1} [r config get compression-sweeper-samples]
+        r config set compression-sweeper-samples 10000
+        assert_error "*must be between 1 and 10000*" {r config set compression-sweeper-samples 0}
+        assert_error "*must be between 1 and 10000*" {r config set compression-sweeper-samples 10001}
+        assert_equal {compression-sweeper-samples 10000} [r config get compression-sweeper-samples]
+        r config set compression-sweeper-samples 500
     }
 
     test {compression-sweeper-backoff-seconds can be changed at runtime and has limits} {
@@ -140,6 +151,27 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
     }
 }
 
+# With one key per call, a cursor call stops in the middle of most buckets, and
+# random sampling needs many calls. hz 100 makes the calls come faster.
+start_server {tags {"compression external:skip"} overrides {compression-mode lz4 maxmemory-policy allkeys-lfu compression-sweeper-samples 1 hz 100}} {
+    foreach policy {cursor random} {
+        test "With compression-sweeper-samples 1, the $policy sweeper compresses all keys" {
+            r config set compression-sweeper-policy $policy
+            r flushall
+            set v [string repeat {{"user_id":3,"role":"member"},} 40]
+            for {set i 0} {$i < 20} {incr i} {
+                r set k$i $v
+                make_cold r k$i
+            }
+            wait_for_condition 200 50 {
+                [getInfoProperty [r info compression] compressed_values] == 20
+            } else {
+                fail "not all keys were compressed"
+            }
+        }
+    }
+}
+
 tags {"compression external:skip"} {
     test {Bad compression settings stop the server at startup} {
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-mode zstd]
@@ -152,6 +184,7 @@ tags {"compression external:skip"} {
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-lfu-threshold 256]
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-sweeper-policy lru]
         assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-sweeper-backoff-seconds 3601]
+        assert_match "*FATAL CONFIG FILE ERROR*" [compression_start_fails --compression-sweeper-samples 0]
         assert_match "*compression-min-value-size can't be greater than compression-max-value-size*" \
             [compression_start_fails --compression-min-value-size 2048 --compression-max-value-size 1024]
     }

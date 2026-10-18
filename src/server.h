@@ -2492,6 +2492,7 @@ struct valkeyServer {
     int compression_max_inflight_requests;   /* most compression jobs at the same time */
     int compression_lfu_threshold;           /* LFU counter at or below which a value is cold */
     int compression_sweeper_policy;          /* COMPRESSOR_SWEEPER_POLICY_* */
+    int compression_sweeper_samples;         /* most keys the sweeper checks in one cron call */
     int compression_sweeper_backoff_seconds; /* pause after a pass with almost no work, 0 = off */
     /* Lazy free */
     int lazyfree_lazy_eviction;

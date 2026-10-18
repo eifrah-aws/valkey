@@ -73,15 +73,22 @@
 #define COMPRESSOR_SWEEPER_BACKOFF_SECONDS_MAX 3600
 #define COMPRESSOR_SWEEPER_BACKOFF_SECONDS_DEFAULT 60
 
+/* compression-sweeper-samples: the most keys the sweeper looks at in one
+ * compressorCron() call. With the cursor policy, it is also the most buckets
+ * the scan visits in one call, so a table with many empty buckets does not
+ * make the call long. This keeps the work on the main thread small, also
+ * when compression-max-inflight-requests is large. The default is not final.
+ * It will be set after a benchmark. */
+#define COMPRESSOR_SWEEPER_SAMPLES_MIN 1
+#define COMPRESSOR_SWEEPER_SAMPLES_MAX 10000
+#define COMPRESSOR_SWEEPER_SAMPLES_DEFAULT 500
+
+/* The random policy reads samples in batches of this size, so its array on
+ * the stack does not grow with compression-sweeper-samples. */
+#define COMPRESSOR_SWEEPER_SAMPLE_BATCH 128
+
 /* Fixed values. Users can not change these in v1. A later version may turn
  * them into settings. */
-
-/* The most keys the sweeper looks at in one compressorCron() call. With the
- * cursor policy, it is also the most buckets the scan visits in one call, so a
- * table with many empty buckets does not make the call long. This keeps the
- * work on the main thread small, also when compression-max-inflight-requests
- * is large. The value is not final. It will be set after a benchmark. */
-#define COMPRESSOR_SAMPLES_PER_CRON 500
 
 /* The backoff of the cursor sweeper starts when less than this many percent
  * of the keys checked in a pass were eligible. Not 0: a pass over 1M keys
