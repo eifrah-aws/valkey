@@ -6,7 +6,11 @@ snapshots, compression.csv), computes every metric again, and compares the
 result with summary.csv. It also checks that the run did what the scenario
 asked for, and that the INFO counters add up. Exit code 1 when a check fails.
 
-Usage: analyze.py RESULTS_DIR
+Usage: analyze.py RESULTS_DIR [--markdown FILE]
+
+With --markdown, it also writes the result tables into FILE, between the
+lines "<!-- tables:start -->" and "<!-- tables:end -->". All numbers in the
+tables come from the raw files, as sb and INFO report them.
 """
 
 import csv
@@ -55,7 +59,7 @@ def scenarios(run_dir):
     return out
 
 
-def main(run_dir):
+def main(run_dir, md_path=None):
     summary = {r["scenario"]: r for r in csv.DictReader(open(os.path.join(run_dir, "summary.csv")))}
     data = {}
 
@@ -130,8 +134,9 @@ def main(run_dir):
         else:
             check(num(b, "compressed_values") == 0, f"{name}: baseline has compressed values")
 
+        get_info = {t: info(os.path.join(d, f"info-after-get-touch-{t}.txt")) for t in TOUCHES}
         data[name] = dict(start=start, settings=settings, compressed=compressed, set=s, gets=gets,
-                          a=a, b=b, e=e, rows=rows)
+                          a=a, b=b, e=e, rows=rows, get_info=get_info)
 
     # Times to 50/90/99% of the best compressed_values of the run.
     best = max(int(r["compressed_values"]) for v in data.values() for r in v["rows"])
@@ -167,6 +172,10 @@ def main(run_dir):
                   f"{name}: summary.csv {k}={srow[k]}, raw files give {x}")
 
     report(data, best)
+    if md_path:
+        write_markdown(md_path, markdown_tables(data, best))
+        print()
+        print(f"Wrote the tables to {md_path}")
     print()
     if failures:
         print(f"FAILED: {len(failures)} check(s)")
@@ -224,8 +233,130 @@ def report(data, best):
         print(f"Noise check, GET {t}% p99 over {', '.join(same)}: min {min(vals):.2f}, max {max(vals):.2f} ms")
 
 
+PCTS = ["pmin", "p50", "p90", "p95", "p99", "p995", "p999", "pmax"]
+
+
+def scenario_settings(v):
+    args = v["start"].split()
+
+    def arg(name, default="-"):
+        return args[args.index(name) + 1] if name in args else default
+    st = v["settings"]
+    return [arg("--io-threads"), arg("--compression-mode", "off"), arg("--compression-threads"),
+            arg("--compression-max-inflight-requests"), st.get("compression-sweeper-policy", "-"),
+            st.get("compression-sweeper-samples", "-"), st.get("compression-sweeper-backoff-seconds", "-")]
+
+
+def gib(v):
+    """Bytes as GiB (1024^3 bytes, like INFO used_memory_human), 2 digits."""
+    return f"{float(v) / 1024 ** 3:.2f} GiB"
+
+
+def md_table(head, rows):
+    out = ["| " + " | ".join(head) + " |", "|" + "|".join("---" for _ in head) + "|"]
+    out += ["| " + " | ".join(str(c) for c in r) + " |" for r in rows]
+    return "\n".join(out)
+
+
+def markdown_tables(data, best):
+    names = list(data)
+    parts = []
+
+    parts.append("### Scenarios\n\nEach scenario changes one setting from cursor-base. "
+                 "All runs also pass `--save '' --protected-mode no --maxmemory-policy allkeys-lfu`.\n")
+    parts.append(md_table(["Scenario", "io-threads", "compression-mode", "compression-threads",
+                           "max-inflight-requests", "sweeper-policy", "sweeper-samples", "backoff-seconds"],
+                          [[f"`{n}`"] + scenario_settings(data[n]) for n in names]))
+
+    def t(v, p):
+        for r in v["rows"]:
+            if int(r["compressed_values"]) >= best * p / 100:
+                return r["elapsed_s"]
+        return "-"
+    base_mem = num(data["baseline-off"]["a"], "used_memory")
+    rows = []
+    for n in names:
+        a, b, e = data[n]["a"], data[n]["b"], data[n]["e"]
+        mem = num(b, "used_memory")
+        rows.append([f"`{n}`", gib(a["used_memory"]), gib(b["used_memory"]), f"{100 * (mem - base_mem) / base_mem:.1f}%",
+                     b.get("compressed_values", "0"), gib(b.get("compressed_values_original_bytes", 0)),
+                     gib(b.get("compressed_values_bytes", 0)), gib(b.get("compression_saved_bytes", 0)),
+                     gib(e["used_memory"])])
+    parts.append("### Memory\n\nIn GiB (1 GiB = 1024^3 bytes, the unit of INFO `used_memory_human`). `used_memory` "
+                 "after the SET load, after the 10-minute watch, and at the end (after the 4 GET runs). The change "
+                 "is against `baseline-off` after SET, computed from the bytes. The `compressed_*` columns are "
+                 "after the watch.\n")
+    parts.append(md_table(["Scenario", "used_memory after SET", "used_memory after watch", "change",
+                           "compressed_values", "compressed_values_original_bytes", "compressed_values_bytes",
+                           "compression_saved_bytes", "used_memory at end"], rows))
+
+    rows = []
+    for n in names:
+        v = data[n]
+        a, b, e = v["a"], v["b"], v["e"]
+        main_cpu = (num(b, "used_cpu_sys_main_thread") + num(b, "used_cpu_user_main_thread") -
+                    num(a, "used_cpu_sys_main_thread") - num(a, "used_cpu_user_main_thread"))
+        total_cpu = num(b, "used_cpu_sys") + num(b, "used_cpu_user") - num(a, "used_cpu_sys") - num(a, "used_cpu_user")
+        worker = float(b.get("compression_total_compression_time_us", 0)) / 1e6
+        dec = int(float(e.get("compression_total_values_decompressed", 0)) -
+                  float(b.get("compression_total_values_decompressed", 0)))
+        rows.append([f"`{n}`", t(v, 50), t(v, 90), t(v, 99), b.get("compression_total_keys_checked", "0"),
+                     b.get("compression_total_keys_eligible", "0"), b.get("compression_total_sweeper_passes", "0"),
+                     b.get("compression_total_sweeper_backoffs", "0"), f"{main_cpu:.2f}", f"{total_cpu:.2f}",
+                     f"{worker:.2f}", dec])
+    parts.append(f"### Sweeper, during the 10-minute watch\n\nt50/t90/t99: seconds after the end of the SET load "
+                 f"until `compressed_values` reached 50/90/99% of {best} (the best value of the run); \"-\" means "
+                 f"not reached in 600 s. CPU is in seconds, from INFO. The last column counts the decompressions of "
+                 f"all 4 GET runs.\n")
+    parts.append(md_table(["Scenario", "t50 s", "t90 s", "t99 s", "keys_checked", "keys_eligible", "passes",
+                           "backoffs", "main-thread CPU s", "total CPU s", "worker compression s",
+                           "values decompressed by GETs"], rows))
+
+    rows = []
+    for n in names:
+        s = data[n]["set"]
+        rows.append([f"`{n}`", s["rps"]] + [s["latency_ms"][p] for p in PCTS])
+    parts.append("### SET load\n\n5M requests (4,999,680 after sb rounds to 512 connections), 1M keys, "
+                 "`github-events` values. Latency in ms, as sb reports it.\n")
+    parts.append(md_table(["Scenario", "rps"] + PCTS, rows))
+
+    for touch in TOUCHES:
+        rows = []
+        for n in names:
+            v = data[n]
+            g = v["gets"][touch]
+            prev = v["b"] if touch == TOUCHES[0] else v["get_info"][TOUCHES[TOUCHES.index(touch) - 1]]
+            cur = v["get_info"][touch]
+            dec = int(float(cur.get("compression_total_values_decompressed", 0)) -
+                      float(prev.get("compression_total_values_decompressed", 0)))
+            rows.append([f"`{n}`", g["rps"]] + [g["latency_ms"][p] for p in PCTS] +
+                        [g["total_hits"], prev.get("compressed_values", "0"), dec])
+        label = "all keys (no `--touch-keys`)" if touch == "100" else f"`--touch-keys {touch}` (the first {touch}% of the keys)"
+        parts.append(f"### GET, {label}\n\n5M requests, `--limit-rps 100000`. Latency in ms, as sb reports it. "
+                     f"\"compressed before\" is `compressed_values` when the run starts; \"decompressed\" is the "
+                     f"number of values this run decompressed.\n")
+        parts.append(md_table(["Scenario", "rps"] + PCTS + ["hits", "compressed before", "decompressed"], rows))
+    return "\n\n".join(x.strip() for x in parts)
+
+
+def write_markdown(path, tables):
+    text = open(path).read()
+    start, end = "<!-- tables:start -->", "<!-- tables:end -->"
+    if start not in text or end not in text:
+        raise SystemExit(f"{path}: no {start} / {end} lines")
+    head, rest = text.split(start, 1)
+    tail = rest.split(end, 1)[1]
+    open(path, "w").write(head + start + "\n\n" + tables + "\n\n" + end + tail)
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    args = sys.argv[1:]
+    md = None
+    if "--markdown" in args:
+        i = args.index("--markdown")
+        md = args[i + 1]
+        del args[i:i + 2]
+    if len(args) != 1:
         print(__doc__)
         sys.exit(2)
-    sys.exit(main(sys.argv[1]))
+    sys.exit(main(args[0], md))
