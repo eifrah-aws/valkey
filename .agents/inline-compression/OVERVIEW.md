@@ -30,17 +30,19 @@ Branch `valkey-inline-compression` (fork `eifrah-aws/valkey`). Design: `design-d
 
 ## Still to do
 
-1. Set the defaults from the benchmark: keep `cursor` with 500 samples, and raise max in-flight jobs from 100 to 1000.
-2. Design a lower read cost: decompress in the I/O threads, or keep the frame on a read of a cold key.
-3. Skip values that are already compressed (PNG, JPEG, gzip, ...) by their first bytes.
+In order.
+
+1. Support forkless save: clone the plain bytes for the save thread, copy (do not decompress in place) on a read of a key that the save thread holds, and keep module write handles from decompressing such keys (`plan.md`, "Separate task: forkless save support").
+2. Compress values on slot-migration import and on replica apply, to avoid a memory spike.
+3. Set the defaults from the benchmark: keep `cursor` with 500 samples, and raise max in-flight jobs from 100 to 1000.
 4. Check the sweeper with `CLIENT PAUSE WRITE` and on replicas, and add the missing sweeper tests.
 5. Add a "save as plain" option, so that an older Valkey version can load the RDB (downgrade).
-6. Compress values on slot-migration import and on replica apply, to avoid a memory spike.
+6. Skip values that are already compressed (PNG, JPEG, gzip, ...) by their first bytes.
 7. Run the full measurements of the design TODOs.
-8. Write the user documentation (`valkey.conf`, INFO fields), and recommend `activedefrag yes` with compression, so RSS follows `used_memory`.
-9. Add the compression dictionary registry, for better ratios on small values.
-10. Add the zstd backend and dictionary training.
-11. Support forkless save: clone the plain bytes for the save thread, copy (do not decompress in place) on a read of a key that the save thread holds, and keep module write handles from decompressing such keys (`plan.md`, "Separate task: forkless save support").
+8. Add the compression dictionary registry, for better ratios on small values.
+9. Add the zstd backend and dictionary training.
+10. Write the user documentation (`valkey.conf`, INFO fields), and recommend `activedefrag yes` with compression, so RSS follows `used_memory`.
+11. Design a lower read cost: decompress in the I/O threads, or keep the frame on a read of a cold key.
 
 <div style="page-break-after: always;"></div>
 
