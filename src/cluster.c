@@ -186,7 +186,7 @@ void dumpCommand(client *c) {
     rio payload;
 
     /* Check if the key is here. A compressed value stays compressed: the RDB
-     * code writes its plain bytes. */
+     * code writes its frame as it is (RDB_TYPE_STRING_COMPRESSED). */
     if ((o = lookupKeyReadWithFlags(c->db, c->argv[1], LOOKUP_NODECOMPRESS)) == NULL) {
         addReplyNull(c);
         return;

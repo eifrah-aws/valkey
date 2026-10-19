@@ -100,6 +100,8 @@ This tradeoff is deliberate: the first read gives back that key's memory saving.
 
 RDB save writes each value **as-is**: plain values remain plain and compressed values remain compressed. It also serializes the frame-format and algorithm metadata plus every compression dictionary referenced by the snapshot. The snapshot must never contain a frame whose dictionary is absent, including when retraining or dictionary retirement overlaps a background save.
 
+The format is RDB version 82. A compressed value has the type `RDB_TYPE_STRING_COMPRESSED` (24), followed by the frame bytes as they are, without LZF. The type is chosen by the target RDB version (`rdbGetObjectType()`): a target that supports only an older version, such as a full sync to a Valkey 9.2 replica, gets the plain bytes as `RDB_TYPE_STRING`. `DUMP` payloads carry RDB version 82, so `RESTORE` on an older server fails, as for any RDB version change.
+
 A full synchronization uses this RDB representation as its baseline. The replica loads the snapshot as described in §3.3 and then applies the buffered, uncompressed replication commands produced after the snapshot offset. This preserves in-memory savings across full sync without making the incremental replication stream compression-aware.
 
 ### 4.4 Replication stream propagation
@@ -310,7 +312,7 @@ Finally, a **net-savings guard** compares **allocation sizes**, not string lengt
 
 Errors are codes, not logs. A frame function sets `compressorAlg.last_error` (for example `COMPRESSOR_ERR_FRAME_VERSION` or `COMPRESSOR_ERR_DICTIONARY_MISMATCH`), and the caller, which knows the key, decides what to log and count.
 
-Frames created locally are trusted internal objects. Frames loaded from RDB are persisted input and must be validated before installation: supported algorithm, known format version, valid lengths, and a resolvable dictionary reference when `dict_id` is nonzero (§3.3).
+Frames created locally are trusted internal objects. Frames loaded from RDB are persisted input and must be validated before installation: supported algorithm, known format version, valid lengths, and a resolvable dictionary reference when `dict_id` is nonzero (§3.3). `RESTORE` payloads come from clients, and a read stops the server on a frame that does not decompress, so the load also decompresses the body once into a temporary buffer and checks its length (`compressorCreateStringObjectFromFrame()`).
 
 ---
 
@@ -323,8 +325,8 @@ Valkey uses a new object encoding, `OBJ_ENCODING_COMPRESSED` (14). The `encoding
 This approach requires an audit of every site that reads `obj->encoding` directly. These sites fall into four groups:
 
 - **Client read** → synchronously decompress in v1, keep the plain value in the keyspace, release the frame, and mark the key hot (§7.2 and §7.3). During a child process, and for module read handles, use a temporary plain copy instead (§7.2).
-- **Need plaintext for another egress path** → synchronously decompress into a temporary value without changing the keyspace: slot migration, replication propagation that materializes a stored value, `DUMP`, and `DEBUG DIGEST`.
-- **Preserve the stored representation** → do not decompress: RDB save copies the frame and persists its referenced decoder metadata and dictionary (§4.3).
+- **Need plaintext for another egress path** → synchronously decompress into a temporary value without changing the keyspace: slot migration, replication propagation that materializes a stored value, a full sync to a replica that supports only an older RDB version, and `DEBUG DIGEST`.
+- **Preserve the stored representation** → do not decompress: RDB save and `DUMP` copy the frame and persist its referenced decoder metadata and dictionary (§4.3).
 - **Only inspect or release the object** → do not decompress: object free (calls `release()` to drop the dictionary's user count when applicable), `MEMORY USAGE`, and active defragmentation. Today the free path (`compressorStringObjectFreed()`) reads the frame header once, for the gauges and for `releaseFrameDictionary()`. That function only checks that `dict_id` is 0, because no frame has a dictionary before Phase 10. Phase 10 cannot call `release()` there as it is: a free can run on a background thread (`FLUSHALL ASYNC`), and each `compressorAlg` instance belongs to one thread.
 
 `DEBUG COMPRESS-KEY <key>` compresses one value now, on the main thread, for tests. It makes the same checks as the sweeper, except the coldness test, and keeps the net-savings guard. It does not change the sweeper counters, so their sums stay right; the `compressed_*` gauges change as usual. It replies `OK`, or an error with the reason. Compressing a value (by the sweeper or by this command) and decompressing it in place send no keyspace events, because the logical value does not change.
@@ -335,7 +337,7 @@ Client reads go through `lookupKey()`, which all commands use to find a key. Whe
 
 `compressorLookupValue()` returns:
 
-- **The value as it is**, when the caller passes `LOOKUP_NODECOMPRESS`. Commands that do not read the bytes do this, so they do not change the key: `OBJECT`, `DEBUG OBJECT`, `TYPE`, `EXISTS`, `TTL`/`PTTL`/`EXPIRETIME`/`PEXPIRETIME`, `TOUCH`, `EXPIRE`/`PEXPIRE`/`EXPIREAT`/`PEXPIREAT`, `PERSIST`, `RENAME`/`RENAMENX`, `MOVE`, and `COPY` (source and destination). `DUMP` and `MIGRATE` do it too: the RDB code writes the plain bytes of the frame into the payload. `COPY` copies the frame (`compressorDupFrame()`), so the new key is compressed too, and both count in `compressed_values`. Lookups that only check whether a key exists, or its type, do it too: `SET` (it replaces the value; `IFEQ`/`IFNE` compare through a temporary plain copy), `SET NX/XX`, `MSETNX`, `MSETEX NX/XX`, `setKey()`, `RESTORE` without `REPLACE`, `VM_KeyExists()`, `getNodeByQuery()`, and the blocked-client type check in `blocked.c`. So a failed `SET NX` leaves the value compressed. `MEMORY USAGE` uses `dbFind()` and does not decompress either. `LOOKUP_NOEFFECTS` does not include `LOOKUP_NODECOMPRESS`, because a module can open a key with NOEFFECTS and still read its bytes.
+- **The value as it is**, when the caller passes `LOOKUP_NODECOMPRESS`. Commands that do not read the bytes do this, so they do not change the key: `OBJECT`, `DEBUG OBJECT`, `TYPE`, `EXISTS`, `TTL`/`PTTL`/`EXPIRETIME`/`PEXPIRETIME`, `TOUCH`, `EXPIRE`/`PEXPIRE`/`EXPIREAT`/`PEXPIREAT`, `PERSIST`, `RENAME`/`RENAMENX`, `MOVE`, and `COPY` (source and destination). `DUMP` and `MIGRATE` do it too: the RDB code writes the frame into the payload as it is (§4.3), and `RESTORE` keeps it compressed. `COPY` copies the frame (`compressorDupFrame()`), so the new key is compressed too, and both count in `compressed_values`. Lookups that only check whether a key exists, or its type, do it too: `SET` (it replaces the value; `IFEQ`/`IFNE` compare through a temporary plain copy), `SET NX/XX`, `MSETNX`, `MSETEX NX/XX`, `setKey()`, `RESTORE` without `REPLACE`, `VM_KeyExists()`, `getNodeByQuery()`, and the blocked-client type check in `blocked.c`. So a failed `SET NX` leaves the value compressed. `MEMORY USAGE` uses `dbFind()` and does not decompress either. `LOOKUP_NOEFFECTS` does not include `LOOKUP_NODECOMPRESS`, because a module can open a key with NOEFFECTS and still read its bytes.
 - **The stored value, decompressed in place**, for a write (`LOOKUP_WRITE`), or for a read when no child process runs. Only the value buffer and the encoding change. The object, its key, its TTL, and its LRU/LFU data stay the same. The key is then hot (§7.3).
 - **A temporary plain copy**, for a read while a child process runs. The copy has the same key, TTL, and LRU/LFU data, because a caller may read them from the object. Callers are commands that read the bytes, for example `GET`, `GETRANGE`, and `STRLEN`. The stored frame does not change, so the read causes no copy-on-write (§6.1). The copy goes on a cleanup list. `call()` notes the length of the list when a command starts, and `compressorReleasePlainCopiesSince()` releases the copies added after that when the command ends, also for a command inside a `MULTI`, a script, or a module call. `compressorAfterCall()` in `afterCommand()` releases all copies when the outermost command ends, and `compressorBeforeSleep()` also releases them, as a safety net. `PFCOUNT` looks up with `LOOKUP_NODECOMPRESS` and decompresses the stored value in place, because it writes its cached count into it.
 
@@ -367,7 +369,7 @@ The set tracks key identity, not a `robj *` or value pointer. It must not keep a
 
 Once a client reads a compressed value (with no child process running), the plain value replaces the frame and stays in the keyspace. Later reads avoid decompression. The key stays out of the sweeper while it is in the hot-key LRU, and it must also pass the normal coldness test after it leaves that set.
 
-Other paths that need plain bytes do not prove that the key is hot. Slot migration, replication propagation, `DUMP`, `DEBUG DIGEST`, RDB save, and AOF rewrite use a temporary plain copy, and leave the stored frame unchanged. In this version RDB save writes plain values; §3.3 and §4.3 describe the later format that keeps frames.
+Other paths that need plain bytes do not prove that the key is hot. Slot migration, replication propagation, `DEBUG DIGEST`, and command-form AOF rewrite use a temporary plain copy, and leave the stored frame unchanged. RDB save and `DUMP` write the frame as it is (§4.3).
 
 This policy trades memory for CPU only when a compressed key becomes active. A one-time scan by a client can decompress many values and move the keyspace back toward its uncompressed size, but the bounded LRU prevents repeated compression/decompression churn. Values that are not read again cool down and are compressed in later sweeps.
 
@@ -527,7 +529,7 @@ Implementation notes (`src/compressor/compressor_stats.{h,c}`):
 - `compression` is not a default INFO section. `INFO compression`, `INFO all`, and `INFO everything` show it. A plain `INFO` does not, so its output does not change.
 - The three `compressed_values*` gauges change on install, on decompress in place, and on free (`freeStringObject()` calls `compressorStringObjectFreed()`). A value can be freed on a background thread (`FLUSHALL ASYNC`), so these three use relaxed atomics. All other counters change only on the main thread. Gauges and counters are two separate structs, so `CONFIG RESETSTAT` clears only the counters and never writes the gauges: a background free cannot be lost during a reset.
 - The time counters use `getMonotonicUs()`, read twice per compression or decompression.
-- Any code that creates a compressed value without `compressorSetCompressedValue()` (for example RDB load later) must add it to the gauges.
+- Any code that creates a compressed value without `compressorSetCompressedValue()` (for example RDB load, in `compressorCreateStringObjectFromFrame()`) must add it to the gauges.
 
 Later phases add counters for the hot-key LRU (§7.3), dictionary training (§5), and the skip list for already-compressed formats (§6.1).
 

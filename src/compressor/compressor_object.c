@@ -10,6 +10,7 @@
 #include "compressor/compressor_object.h"
 #include "compressor/compressor_frame.h"
 #include "server.h"
+#include "rdb.h"
 #include "adlist.h"
 #include "monotonic.h"
 #include "compressor/compressor_stats.h"
@@ -58,6 +59,65 @@ sds compressorDupFrame(const robj *o) {
     sds frame = sdsdup(objectGetVal(o));
     compressorStatsAddValue(compressorStringObjectLen(o), compressorFrameAllocSize(frame));
     return frame;
+}
+
+robj *compressorCreateStringObjectFromFrame(sds frame, const char **reason) {
+    compressorFrameHeader hdr;
+    int err = compressorFrameParse(frame, &hdr);
+    if (err != COMPRESSOR_ERR_NONE) {
+        *reason = compressorStrerror(err);
+        return NULL;
+    }
+    if (hdr.original_encoding != OBJ_ENCODING_RAW) {
+        *reason = "the frame is not a string";
+        return NULL;
+    }
+    /* Dictionaries come in a later phase. */
+    if (hdr.dict_id != 0) {
+        *reason = "the frame needs a dictionary";
+        return NULL;
+    }
+    compressorAlg *c = compressorGetForMainThread(hdr.algorithm_id);
+    if (c == NULL) {
+        *reason = "this build has no backend for the algorithm of the frame";
+        return NULL;
+    }
+    /* A read stops the server on a frame that does not decompress, so check
+     * the body now. compressorFrameDecompress() also checks the length. */
+    sds plain = compressorFrameDecompress(c, frame, NULL);
+    if (plain == NULL) {
+        *reason = compressorStrerror(c->last_error);
+        return NULL;
+    }
+    sdsfree(plain);
+
+    robj *o = createObject(OBJ_STRING, frame);
+    objectSetEncoding(o, OBJ_ENCODING_COMPRESSED);
+    compressorStatsAddValue(hdr.uncompressed_len, compressorFrameAllocSize(frame));
+    return o;
+}
+
+ssize_t compressorRdbSaveCompressedString(rio *rdb, robj *o) {
+    serverAssert(compressorIsCompressedString(o));
+    sds frame = objectGetVal(o);
+    ssize_t n, nwritten = 0;
+    if ((n = rdbSaveLen(rdb, sdslen(frame))) == -1) return -1;
+    nwritten += n;
+    if ((n = rdbWriteRaw(rdb, frame, sdslen(frame))) == -1) return -1;
+    nwritten += n;
+    return nwritten;
+}
+
+robj *compressorRdbLoadCompressedString(rio *rdb) {
+    sds frame = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
+    if (frame == NULL) return NULL;
+    const char *reason;
+    robj *o = compressorCreateStringObjectFromFrame(frame, &reason);
+    if (o == NULL) {
+        rdbReportError(1, __LINE__, "Bad compressed string: %s", reason);
+        sdsfree(frame);
+    }
+    return o;
 }
 
 /* Reads the frame header of the compressed string o. Stops the server if the

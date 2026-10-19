@@ -159,3 +159,55 @@ TEST_F(CompressorObjectTest, DupStringObjectCopiesTheFrame) {
     decrRefCount(d);
     decrRefCount(o);
 }
+
+TEST_F(CompressorObjectTest, CreateFromFrameKeepsTheFrame) {
+    unsigned long long values = compressor_stats.gauges.compressed_values;
+    unsigned long long original = compressor_stats.gauges.compressed_values_original_bytes;
+    sds frame = compressorFrameBuild(compressorGetForMainThread(COMPRESSOR_ALG_LZ4), OBJ_ENCODING_RAW, value, value_len, NULL);
+    ASSERT_TRUE(frame != NULL);
+    const char *reason = NULL;
+    robj *o = compressorCreateStringObjectFromFrame(frame, &reason);
+    ASSERT_TRUE(o != NULL);
+    EXPECT_EQ(objectGetEncoding(o), OBJ_ENCODING_COMPRESSED);
+    EXPECT_TRUE(objectGetVal(o) == frame);
+    EXPECT_EQ(compressorStringObjectLen(o), value_len);
+    EXPECT_EQ(compressor_stats.gauges.compressed_values, values + 1);
+    EXPECT_EQ(compressor_stats.gauges.compressed_values_original_bytes, original + value_len);
+
+    sds plain = compressorDecompressToSds(o);
+    ASSERT_EQ(sdslen(plain), value_len);
+    EXPECT_EQ(memcmp(plain, value, value_len), 0);
+    sdsfree(plain);
+    decrRefCount(o);
+    EXPECT_EQ(compressor_stats.gauges.compressed_values, values);
+}
+
+TEST_F(CompressorObjectTest, CreateFromFrameRefusesABadFrame) {
+    unsigned long long values = compressor_stats.gauges.compressed_values;
+    sds good = compressorFrameBuild(compressorGetForMainThread(COMPRESSOR_ALG_LZ4), OBJ_ENCODING_RAW, value, value_len, NULL);
+    ASSERT_TRUE(good != NULL);
+
+    /* Each case changes one byte of the header: algorithm, format version,
+     * original encoding, dictionary id, and uncompressed length. */
+    const int offsets[] = {8, 9, 9, 4, 0};
+    const unsigned char bytes[] = {200, 0xF0, 0x1F, 1, 0};
+    for (int i = 0; i < 5; i++) {
+        sds bad = sdsdup(good);
+        if (i == 4)
+            bad[0] = (char)(bad[0] + 1);
+        else
+            bad[offsets[i]] = (char)bytes[i];
+        const char *reason = NULL;
+        EXPECT_TRUE(compressorCreateStringObjectFromFrame(bad, &reason) == NULL) << "case " << i;
+        EXPECT_TRUE(reason != NULL) << "case " << i;
+        sdsfree(bad);
+    }
+
+    /* A frame with no body. */
+    sds shorter = sdsnewlen(good, COMPRESSOR_FRAME_HEADER_LEN);
+    const char *reason = NULL;
+    EXPECT_TRUE(compressorCreateStringObjectFromFrame(shorter, &reason) == NULL);
+    sdsfree(shorter);
+    sdsfree(good);
+    EXPECT_EQ(compressor_stats.gauges.compressed_values, values);
+}

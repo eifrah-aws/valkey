@@ -591,7 +591,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         r config set appendonly no
     } {OK} {needs:debug}
 
-    test {Replicas get plain values} {
+    test {Replicas get compressed values in a full sync, and plain values in the stream} {
         start_server {overrides {compression-mode off}} {
             set primary [srv -1 client]
             set replica [srv 0 client]
@@ -605,6 +605,9 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
             $primary set after [compression_value 2]
             wait_for_ofs_sync $primary $replica
             compress_key $primary after
+            # The full sync sends the frame (RDB 82), so the value stays
+            # compressed, also with compression-mode off.
+            assert_equal compressed [$replica object encoding before]
             assert_equal [compression_value 1] [$replica get before]
             assert_equal [compression_value 2] [$replica get after]
             assert_equal raw [$replica object encoding after]

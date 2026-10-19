@@ -51,6 +51,10 @@ proc generate_types {} {
     # create other non-collection types
     r incr int
     r set string str
+    # a compressed string (RDB_TYPE_STRING_COMPRESSED), so the fuzzer also
+    # corrupts frames
+    r set compressed [string repeat "{\"user_id\":1,\"role\":\"member\"}," 32]
+    r debug compress-key compressed
 
     # create bigger objects with 10 items (more than a single ziplist / listpack)
     generate_collections big 10
@@ -93,7 +97,7 @@ test "Fuzzer corrupt restore payloads" {
         fail "insufficient timeout"
     }
     # start a server, fill with data and save an RDB file once (avoid re-save)
-    start_server [list overrides [list "save" "" use-exit-on-panic yes crash-memcheck-enabled no loglevel verbose] ] {
+    start_server [list overrides [list "save" "" use-exit-on-panic yes crash-memcheck-enabled no loglevel verbose compression-mode lz4] ] {
         set stdout [srv 0 stdout]
         r debug set-skip-checksum-validation 1
         set start_time [clock seconds]

@@ -18,8 +18,10 @@
 #include "sds.h"
 
 #include <stdbool.h>
+#include <sys/types.h>
 
 struct serverObject;
+struct _rio;
 
 /* The compressor that the main thread uses for an algorithm. Each one is made
  * the first time it is needed, so a frame from any algorithm can be read, even
@@ -42,6 +44,27 @@ void compressorSetCompressedValue(struct serverObject *o, sds frame);
  * object gets new LRU/LFU data, so the copy starts hot, like a COPY of a plain
  * value. compressorCreatePlainCopy() is different: it keeps the LRU/LFU data. */
 sds compressorDupFrame(const struct serverObject *o);
+
+/* Returns a new compressed string object that holds frame, a frame loaded
+ * from RDB or a DUMP payload, and adds it to INFO compression. The object
+ * takes over frame. Checks the header, and decompresses the body once into a
+ * temporary buffer, so a bad frame never reaches the keyspace (a RESTORE
+ * payload comes from a client). Returns NULL and sets *reason when the frame
+ * is not valid. The caller then still owns frame. Main thread only. */
+struct serverObject *compressorCreateStringObjectFromFrame(sds frame, const char **reason);
+
+/* Writes the compressed string o to an RDB as RDB_TYPE_STRING_COMPRESSED
+ * data: the frame length, then the frame bytes as they are, without LZF.
+ * rdb may be NULL, to count the bytes only. Returns the number of bytes
+ * written, or -1 on a write error. */
+ssize_t compressorRdbSaveCompressedString(struct _rio *rdb, struct serverObject *o);
+
+/* Reads RDB_TYPE_STRING_COMPRESSED data from an RDB, written by
+ * compressorRdbSaveCompressedString(), and returns a new compressed string
+ * object (see compressorCreateStringObjectFromFrame()). The value stays
+ * compressed. Returns NULL on a read error, or when the frame is not valid;
+ * a bad frame is reported as a corrupt RDB. Main thread only. */
+struct serverObject *compressorRdbLoadCompressedString(struct _rio *rdb);
 
 /* Updates INFO compression before a compressed string o is freed. Can run on
  * a background thread (FLUSHALL ASYNC). */

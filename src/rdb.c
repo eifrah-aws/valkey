@@ -127,9 +127,6 @@ bool rdbIsVersionAccepted(int rdbver, bool is_valkey_magic, bool is_redis_magic)
     return true;
 }
 
-#ifdef __GNUC__
-void rdbReportError(int corruption_error, int linenum, char *reason, ...) __attribute__((format(printf, 3, 4)));
-#endif
 void rdbReportError(int corruption_error, int linenum, char *reason, ...) {
     va_list ap;
     char msg[1024];
@@ -765,7 +762,10 @@ int rdbLoadBinaryFloatValue(rio *rdb, float *val) {
  * can't be represented in the given RDB version (only for older RDB). */
 int rdbGetObjectType(robj *o, int rdbver) {
     switch (objectGetType(o)) {
-    case OBJ_STRING: return RDB_TYPE_STRING;
+    case OBJ_STRING:
+        /* An older target gets the plain bytes (rdbSaveStringObject()). */
+        if (compressorIsCompressedString(o) && rdbver >= 82) return RDB_TYPE_STRING_COMPRESSED;
+        return RDB_TYPE_STRING;
     case OBJ_LIST:
         if (objectGetEncoding(o) == OBJ_ENCODING_QUICKLIST || objectGetEncoding(o) == OBJ_ENCODING_LISTPACK)
             return RDB_TYPE_LIST_QUICKLIST_2;
@@ -923,7 +923,10 @@ ssize_t rdbSaveStreamConsumers(rio *rdb, streamCG *cg) {
  * Returns -1 on error, number of bytes written on success. */
 ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key, int dbid, unsigned char rdbtype) {
     ssize_t n = 0, nwritten = 0;
-    if (objectGetType(o) == OBJ_STRING) {
+    if (rdbtype == RDB_TYPE_STRING_COMPRESSED) {
+        if ((n = compressorRdbSaveCompressedString(rdb, o)) == -1) return -1;
+        nwritten += n;
+    } else if (objectGetType(o) == OBJ_STRING) {
         /* Save a string value */
         if ((n = rdbSaveStringObject(rdb, o)) == -1) return -1;
         nwritten += n;
@@ -2165,6 +2168,8 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error, int rd
         /* Read string value */
         if ((o = rdbLoadEncodedStringObject(rdb)) == NULL) return NULL;
         o = tryObjectEncodingEx(o, 0);
+    } else if (rdbtype == RDB_TYPE_STRING_COMPRESSED) {
+        if ((o = compressorRdbLoadCompressedString(rdb)) == NULL) return NULL;
     } else if (rdbtype == RDB_TYPE_LIST) {
         /* Read list value */
         if ((len = rdbLoadLen(rdb, NULL)) == RDB_LENERR) return NULL;

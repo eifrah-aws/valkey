@@ -35,7 +35,7 @@ done. `[NOT STARTED]` means no work has started.
 13. [WIP] Phase 5 - Benchmark `cursor` and `random`, then choose the defaults. Done: `compression-sweeper-samples` is now a setting (was `COMPRESSOR_SAMPLES_PER_CRON`). Left: the benchmark script and the runs.
 14. [NOT STARTED] Phase 5 - Magic-byte skip table for data that is already compressed.
 15. [NOT STARTED] Phase 5 - Check `CLIENT PAUSE WRITE` and replicas, and the missing sweeper tests.
-16. [NOT STARTED] Phase 6 - RDB and AOF persistence: a new RDB type that saves frames as they are.
+16. [WIP] Phase 6 - RDB and AOF persistence: a new RDB type that saves frames as they are. Done: RDB 82 with `RDB_TYPE_STRING_COMPRESSED`, save and load, tests. Left: the dictionary section (with Phase 10), a "save as plain" switch for downgrade.
 17. [NOT STARTED] Phase 7 - Compress on import and on replica apply (no memory spike).
 18. [NOT STARTED] Phase 8 - Measurements.
 19. [NOT STARTED] Phase 9 - Documentation.
@@ -448,6 +448,37 @@ Left:
 
 Goal: save and load values as-is.
 
+Done:
+
+- `RDB_VERSION` 82 (`RDB_VERSION_MAP` entry `{82, 0x090300}`, to agree with
+  upstream before a PR), `RDB_TYPE_STRING_COMPRESSED` = 24, and
+  `rdb_type_string[]` in `valkey-check-rdb.c`.
+- Save: `rdbGetObjectType()` picks the new type for a compressed string when
+  `rdbver >= 82`. `rdbSaveObject()` writes the frame length and the frame
+  bytes, without LZF. An older target (a full sync to a 9.2 replica) gets
+  `RDB_TYPE_STRING` and the plain bytes, as before.
+- Load: `rdbLoadObject()` reads the frame and calls
+  `compressorCreateStringObjectFromFrame()`. It checks the header (algorithm,
+  format version, length, `original_encoding` RAW, `dict_id` 0, a backend in
+  this build), decompresses the body once into a temporary buffer (a RESTORE
+  payload comes from a client, and a read stops the server on a bad frame),
+  and adds the frame to the gauges. Any error fails the load ("Bad compressed
+  string: <reason>").
+- `DUMP`/`RESTORE`/`MIGRATE`, `DEBUG RELOAD`, full sync, and the AOF preamble
+  use the same code. `DEBUG OBJECT serializedlength` is now the frame size.
+- Tests: `tests/integration/compression-rdb.tcl` (reload of a mixed
+  keyspace with gauges, TTL, a server with `compression-mode off`, DUMP type
+  byte and RESTORE, 4 bad frames, AOF preamble, `valkey-check-rdb`, full
+  sync, a fake 9.2 and 9.3 replica), and two unit tests in
+  `test_compressor_object.cpp`. `compression-encoding.tcl`: the full sync
+  test now expects a compressed value on the replica.
+
+Left from the list below: the dictionary section (it can come with Phase 10,
+because RDB 82 is not released), the "save as plain" switch for downgrade,
+and a fixed RDB fixture under `tests/assets/`.
+
+The original plan:
+
 - Bump `RDB_VERSION`. Define:
   - A new value type for a compressed string frame.
   - A dictionary section written before the keyspace (new opcode or aux
@@ -614,7 +645,9 @@ remove the startup refusal. They were found in the audit of Phase 3b:
   string when it clones a value, so the RDB gets frame bytes as the user
   value. Do not clone compressed values, or clone the plain bytes.
 - The save thread decompresses with the main-thread compressor and updates
-  non-atomic counters (`rdbSaveStringObject()` on the forkless thread). Use
+  non-atomic counters (`rdbSaveStringObject()` on the forkless thread). With
+  RDB 82 this happens only for a target with an older RDB version; an RDB 82
+  save writes the frame as it is. Use
   a per-thread compressor, and skip the counters or make them atomic.
 - A client read (or a module write handle) decompresses in place and frees
   the frame while the save thread reads it. Treat a value that the forkless
