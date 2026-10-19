@@ -55,3 +55,40 @@ start_server {tags {"modules"} overrides {compression-mode lz4 maxmemory-policy 
         assert_equal {} [r compression.read nosuchkey]
     }
 }
+
+start_server {tags {"modules"} overrides {compression-mode lz4 maxmemory-policy allkeys-lfu forkless-infrastructure-enabled yes bgsave-default-method forkless save ""}} {
+    r module load $testmodule
+
+    test {A module write handle does not decompress a value that the forkless save holds} {
+        for {set i 0} {$i < 10} {incr i} {
+            r set m$i [module_compression_value]
+            r debug compress-key m$i
+        }
+        r config set rdb-key-save-delay 200000
+        r bgsave
+        wait_for_condition 50 20 {[s rdb_bgsave_in_progress] == 1} else { fail "no save" }
+        assert_equal forkless [s rdb_current_bgsave_type]
+
+        # The command is readonly and does not declare the key, so the save
+        # does not block it. ValkeyModule_OpenKey() refuses a key that the
+        # save holds (null reply), and that key must stay compressed.
+        set refused 0
+        for {set i 0} {$i < 10} {incr i} {
+            set v [r compression.writeundeclared m$i]
+            if {$v eq ""} {
+                incr refused
+                assert_equal compressed [r object encoding m$i]
+            } else {
+                assert_equal [module_compression_value] $v
+            }
+        }
+        assert_morethan $refused 0
+
+        r config set rdb-key-save-delay 0
+        waitForBgsave r
+        r debug reload nosave
+        for {set i 0} {$i < 10} {incr i} {
+            assert_equal [module_compression_value] [r get m$i]
+        }
+    } {} {needs:debug}
+}

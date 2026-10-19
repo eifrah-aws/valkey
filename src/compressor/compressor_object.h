@@ -79,6 +79,11 @@ static inline bool compressorHasPlainCopies(void) {
     return compressor_plain_copies != 0;
 }
 
+/* Returns a new plain string object with the value of the compressed string
+ * o, and the same key and TTL. o does not change. Forkless save gives this
+ * clone to its save thread, in place of o (tryCloneDbEntry()). */
+struct serverObject *compressorCreatePlainClone(struct serverObject *o);
+
 /* Returns a new plain copy of the compressed string val, with the same key,
  * TTL, and LRU/LFU data. val does not change. The caller owns the copy and
  * must release it with decrRefCount(). See compressor_object.c for why. */
@@ -89,9 +94,13 @@ struct serverObject *compressorCreatePlainCopy(struct serverObject *val);
  *
  *   - val itself, when it is not a compressed string, or when
  *     LOOKUP_NODECOMPRESS is set.
- *   - val itself, decompressed in place, for a write (LOOKUP_WRITE), or when
- *     no child process runs. A client uses the key, so it stays plain.
- *   - a temporary plain copy, for a read while a child process runs. val
+ *   - val itself, still compressed, for a write (LOOKUP_WRITE) while the
+ *     forkless save thread holds val. VM_OpenKey() then refuses the key.
+ *   - val itself, decompressed in place, for any other write, or for a read
+ *     when no child process runs and nobody else holds val (refcount 1). A
+ *     client uses the key, so it stays plain.
+ *   - a temporary plain copy, for a read while a child process runs, or while
+ *     someone else holds val (for example the forkless save thread). val
  *     stays compressed. The copy goes on the cleanup list, and
  *     compressorAfterCall() releases it when the command ends. */
 struct serverObject *compressorLookupValue(struct serverObject *val, int flags);

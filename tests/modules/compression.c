@@ -58,6 +58,17 @@ static int compressionReadWrite(ValkeyModuleCtx *ctx, ValkeyModuleString **argv,
   return replyWithString(ctx, argv[1], VALKEYMODULE_READ | VALKEYMODULE_WRITE);
 }
 
+/* COMPRESSION.WRITEUNDECLARED key: reads the key through a write handle, in a
+ * readonly command that does not declare the key. A forkless save does not
+ * block it, so ValkeyModule_OpenKey() itself must refuse a key that the save
+ * thread holds. Replies null when it refuses. */
+static int compressionWriteUndeclared(ValkeyModuleCtx *ctx,
+                                      ValkeyModuleString **argv, int argc) {
+  if (argc != 2)
+    return ValkeyModule_WrongArity(ctx);
+  return replyWithString(ctx, argv[1], VALKEYMODULE_READ | VALKEYMODULE_WRITE);
+}
+
 int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv,
                         int argc) {
   VALKEYMODULE_NOT_USED(argv);
@@ -65,6 +76,8 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv,
   if (ValkeyModule_Init(ctx, "compression", 1, VALKEYMODULE_APIVER_1) ==
       VALKEYMODULE_ERR)
     return VALKEYMODULE_ERR;
+  /* Without this, a save falls back to fork. */
+  ValkeyModule_SetModuleOptions(ctx, VALKEYMODULE_OPTIONS_HANDLE_FORKLESS);
   if (ValkeyModule_CreateCommand(ctx, "compression.read", compressionRead,
                                  "readonly", 1, 1, 1) == VALKEYMODULE_ERR)
     return VALKEYMODULE_ERR;
@@ -74,6 +87,10 @@ int ValkeyModule_OnLoad(ValkeyModuleCtx *ctx, ValkeyModuleString **argv,
   if (ValkeyModule_CreateCommand(ctx, "compression.readwrite",
                                  compressionReadWrite, "write", 1, 1,
                                  1) == VALKEYMODULE_ERR)
+    return VALKEYMODULE_ERR;
+  if (ValkeyModule_CreateCommand(ctx, "compression.writeundeclared",
+                                 compressionWriteUndeclared, "readonly", 0, 0,
+                                 0) == VALKEYMODULE_ERR)
     return VALKEYMODULE_ERR;
   return VALKEYMODULE_OK;
 }

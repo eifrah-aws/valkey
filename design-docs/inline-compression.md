@@ -345,7 +345,7 @@ Client reads go through `lookupKey()`, which all commands use to find a key. Whe
 
 **Failure.** Frames are checked when they are made and when RDB loads, so a decompression failure here means a bug or broken memory. `lookupKey()` cannot return an error (NULL means "no key"), so it stops the server with `serverPanic()`.
 
-No side-map is needed. Commands run on the main thread, so a change in place cannot race another command. Forkless save reads keys on another thread, so for now `compression-mode` cannot be used with `forkless-infrastructure-enabled yes`.
+No side-map is needed. Commands run on the main thread, so a change in place cannot race another command. Forkless save is different: a save thread in the same process reads the objects that the main thread gives it, and each of them has a reference from the save (refcount 2 or more). So a read decompresses in place only when the refcount is 1; otherwise it gets a temporary plain copy, as during a child process. The check is per key, so other keys still decompress in place during the save. A write handle of a module (`VM_OpenKey()`) does not decompress an object that the save holds (`bgIteration_isEntryInuse()`), because `VM_OpenKey()` refuses that key after the lookup. A write to a small string that is not saved yet sends a clone to the save thread first (`tryCloneDbEntry()`); a compressed value is cloned as its plain bytes (`compressorCreatePlainClone()`). The sweeper compresses only values with refcount 1, so it never changes an object that the save holds. The save thread itself never decompresses: forkless save writes only RDB version 82 files, which keep frames as they are (§4.3), and a full sync, which can ask for an older RDB version, always uses a child process.
 
 #### Reply ownership
 
@@ -441,7 +441,7 @@ All names are normal `CONFIG GET` / `CONFIG SET` settings except `compression-mo
 | `compression-sweeper-samples` | `1`-`10000` keys | `500` | The most keys the sweeper checks in one cron call; with `cursor`, also the most buckets it visits. The default is not final (section 6.1). | Yes |
 | `compression-sweeper-backoff-seconds` | `0`-`3600` seconds | `60` | With `cursor`, the pause after a pass in which less than 1% of the checked keys were eligible. 0 turns the backoff off. A change ends a pause at once (section 6.1). | Yes |
 
-The upper limit of the value sizes is `COMPRESSOR_FRAME_MAX_VALUE_LEN`, so 128 KiB is written in one place only. A bigger value is an error and is never changed without a message. `compression-mode` cannot be used with `forkless-infrastructure-enabled yes` yet (§7.2).
+The upper limit of the value sizes is `COMPRESSOR_FRAME_MAX_VALUE_LEN`, so 128 KiB is written in one place only. A bigger value is an error and is never changed without a message.
 
 **The mode names the algorithm, so there is no separate `compression-alg`.** One switch says both *whether* to compress and *how*. An operator cannot express the broken state "compression on, no backend chosen."
 

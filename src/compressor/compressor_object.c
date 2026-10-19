@@ -12,6 +12,7 @@
 #include "server.h"
 #include "rdb.h"
 #include "adlist.h"
+#include "bgiteration.h"
 #include "monotonic.h"
 #include "compressor/compressor_stats.h"
 
@@ -179,6 +180,13 @@ void compressorDecompressStringObject(robj *o) {
     sdsfree(frame);
 }
 
+robj *compressorCreatePlainClone(robj *o) {
+    sds plain = compressorDecompressToSds(o);
+    robj *clone = createStringObjectWithKeyAndExpire(plain, sdslen(plain), objectGetKey(o), objectGetExpire(o));
+    sdsfree(plain);
+    return clone;
+}
+
 /* Why a copy, and not a decompress in place:
  *
  * While a child process runs (BGSAVE, BGREWRITEAOF), the parent and the child
@@ -206,7 +214,19 @@ robj *compressorCreatePlainCopy(robj *val) {
 robj *compressorLookupValue(robj *val, int flags) {
     if (!compressorIsCompressedString(val) || (flags & LOOKUP_NODECOMPRESS)) return val;
 
-    if ((flags & LOOKUP_WRITE) || !hasActiveChildProcess()) {
+    if (flags & LOOKUP_WRITE) {
+        /* The forkless save thread may be reading the frame. Write commands
+         * wait for it, so only VM_OpenKey() gets here, and it refuses the
+         * key after the lookup. */
+        if (bgIteration_isEntryInuse(val)) return val;
+        compressorDecompressStringObject(val);
+        return val;
+    }
+    /* A decompress in place frees the frame. Someone else that holds val
+     * (refcount above 1, for example the forkless save thread) may still read
+     * it. A child process shares all memory pages, so then every read gets a
+     * copy. */
+    if (!hasActiveChildProcess() && objectGetRefcount(val) == 1) {
         compressorDecompressStringObject(val);
         return val;
     }

@@ -26,23 +26,23 @@ Branch `valkey-inline-compression` (fork `eifrah-aws/valkey`). Design: `design-d
 10. Slot migration export sends plain bytes from the snapshot child, without changes to the source, with a cluster test.
 11. `DEBUG COMPRESS-KEY` to compress one key now, for tests.
 12. RDB version 82 with a new type that saves and loads frames as they are (RDB, full sync, AOF preamble, `DUMP`/`RESTORE`/`MIGRATE`), with a load check of every frame; a replica with an older RDB version gets plain bytes.
-13. Unit tests, Tcl and module tests, and a benchmark script with a checker (`bench/`).
+13. Forkless save: a read of a key that the save thread holds gets a temporary copy, a write clones the plain bytes, and a module write handle leaves such a key compressed.
+14. Unit tests, Tcl and module tests, and a benchmark script with a checker (`bench/`).
 
 ## Still to do
 
 In order.
 
-1. Support forkless save: clone the plain bytes for the save thread, copy (do not decompress in place) on a read of a key that the save thread holds, and keep module write handles from decompressing such keys (`plan.md`, "Separate task: forkless save support").
-2. Compress values on slot-migration import and on replica apply, to avoid a memory spike.
-3. Set the defaults from the benchmark: keep `cursor` with 500 samples, and raise max in-flight jobs from 100 to 1000.
-4. Check the sweeper with `CLIENT PAUSE WRITE` and on replicas, and add the missing sweeper tests.
-5. Add a "save as plain" option, so that an older Valkey version can load the RDB (downgrade).
-6. Skip values that are already compressed (PNG, JPEG, gzip, ...) by their first bytes.
-7. Run the full measurements of the design TODOs.
-8. Add the compression dictionary registry, for better ratios on small values.
-9. Add the zstd backend and dictionary training.
-10. Write the user documentation (`valkey.conf`, INFO fields), and recommend `activedefrag yes` with compression, so RSS follows `used_memory`.
-11. Design a lower read cost: decompress in the I/O threads, or keep the frame on a read of a cold key.
+1. Compress values on slot-migration import and on replica apply, to avoid a memory spike.
+2. Set the defaults from the benchmark: keep `cursor` with 500 samples, and raise max in-flight jobs from 100 to 1000.
+3. Check the sweeper with `CLIENT PAUSE WRITE` and on replicas, and add the missing sweeper tests.
+4. Add a "save as plain" option, so that an older Valkey version can load the RDB (downgrade).
+5. Skip values that are already compressed (PNG, JPEG, gzip, ...) by their first bytes.
+6. Run the full measurements of the design TODOs.
+7. Add the compression dictionary registry, for better ratios on small values.
+8. Add the zstd backend and dictionary training.
+9. Write the user documentation (`valkey.conf`, INFO fields), and recommend `activedefrag yes` with compression, so RSS follows `used_memory`.
+10. Design a lower read cost: decompress in the I/O threads, or keep the frame on a read of a cold key.
 
 <div style="page-break-after: always;"></div>
 

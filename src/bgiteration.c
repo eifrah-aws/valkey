@@ -12,6 +12,7 @@
 #include "monotonic.h"
 #include "mutexqueue.h"
 #include "server.h"
+#include "compressor/compressor_object.h"
 
 
 static bool receiveItemsBackFromOneIterator(bgIterator *it);
@@ -819,10 +820,13 @@ static dbEntry *tryCloneDbEntry(dbEntry *de) {
 
         if (itemSize <= bgiter_max_clone_item_bytes) {
             bgiteration_current_clone_memory_pool_size += itemSize;
-            dbEntry *clone = createStringObjectWithKeyAndExpire((char *)objectGetVal(de),
-                                                                sdslen(objectGetVal(de)),
-                                                                objectGetKey(de),
-                                                                objectGetExpire(de));
+            /* A compressed value is cloned as its plain bytes. */
+            dbEntry *clone = compressorIsCompressedString(de)
+                                 ? compressorCreatePlainClone(de)
+                                 : createStringObjectWithKeyAndExpire((char *)objectGetVal(de),
+                                                                      sdslen(objectGetVal(de)),
+                                                                      objectGetKey(de),
+                                                                      objectGetExpire(de));
             ((bgIterationEntryMetadata *)objectGetMetadata(clone))->iterator_epoch =
                 ((bgIterationEntryMetadata *)objectGetMetadata(de))->iterator_epoch;
             return clone;

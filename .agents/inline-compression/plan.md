@@ -41,7 +41,7 @@ done. `[NOT STARTED]` means no work has started.
 19. [NOT STARTED] Phase 9 - Documentation.
 20. [NOT STARTED] Phase 10 - Dictionary registry.
 21. [NOT STARTED] Phase 11 - zstd backend and training.
-22. [NOT STARTED] Separate task - Forkless save support (see the section below).
+22. [DONE] Separate task - Forkless save support (see the section below).
 23. [NOT STARTED] Idea - Decompress in the I/O thread (off-loading).
 24. [NOT STARTED] Idea - Run the whole test suite with compression on (design doc section 10.1).
 
@@ -641,12 +641,33 @@ Goal: default algorithm and trained dictionaries.
 - Tests: unit tests for the zstd backend (same matrix as LZ4); Tcl tests for
   first training, retrain, drain of the old dictionary, max versions.
 
-## Separate task: forkless save support (TODO, not scheduled)
+## Separate task: forkless save support (DONE)
 
-Today `compression-mode` can not be used with
-`forkless-infrastructure-enabled yes`: the server refuses to start
-(`compressorConfigCheck()`), and the forkless setting can not change at
-runtime. So the problems below can not happen now.
+Done: actions 1-5 below. `compression-mode` and
+`forkless-infrastructure-enabled yes` now work together (the refusal in
+`compressorConfigCheck()` is removed).
+
+- Action 1: `compressorCreatePlainClone()` in `compressor_object.c`, and a
+  one-line hook in `tryCloneDbEntry()`.
+- Actions 2 and 3: `compressorLookupValue()`. A read decompresses in place
+  only when no child runs and the refcount is 1, else it gets a temporary
+  copy. A write returns the value unchanged when
+  `bgIteration_isEntryInuse()` is true.
+- Tests: `tests/integration/compression-forkless.tcl` (start, reads during
+  a save, writes during a save with 1000 small keys so the clone path is
+  used, `DEBUG RELOAD NOSAVE` checks the snapshot; the read test also checks
+  that the keys the save thread held load compressed, so the save thread
+  wrote their frames as they are and did not decompress them), and a module test in
+  `tests/unit/moduleapi/compression.tcl` with a new command
+  `compression.writeundeclared` (a readonly command that opens an undeclared
+  key for write; the module sets `VALKEYMODULE_OPTIONS_HANDLE_FORKLESS`).
+  Each test fails without its fix (checked). The compression tests also pass
+  on an ASAN build (CMake, `.build-asan`).
+- Review round 1 asked for a per-thread compressor for the save thread. Not
+  needed: the save thread never decompresses (see "Not needed (checked)"
+  below), and the read test now proves it.
+
+The notes below are the analysis before the work.
 
 How forkless save works (`src/bgiteration.c`, `src/forkless.c`): a thread
 in the same process writes the RDB file, while the main thread runs

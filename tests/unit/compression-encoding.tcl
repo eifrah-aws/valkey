@@ -651,10 +651,3 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         assert_equal [compression_value 2] [r get cold]
     }
 }
-
-tags {"compression external:skip"} {
-    test {compression-mode can't be used with forkless-infrastructure-enabled} {
-        catch {exec $::VALKEY_SERVER_BIN --port 0 --compression-mode lz4 --forkless-infrastructure-enabled yes 2>@1} out
-        assert_match "*compression-mode can't be used with forkless-infrastructure-enabled yes*" $out
-    }
-}
