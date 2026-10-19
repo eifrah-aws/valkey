@@ -48,16 +48,18 @@ Branch `valkey-inline-compression` (fork `eifrah-aws/valkey`). Design: `design-d
 
 **Setup.** Server: 64 cores, 123.52 GiB, `hz 10`, `--io-threads 12`, `allkeys-lfu`. Client: sb, 512 connections, 16 threads. 5M `SET` over 1M keys (`github-events` JSON, 2,044 bytes on average, 1.90 GiB of values), 10 minutes without load (20 minutes in the defrag run), then 5M `GET` at a limit of 100,000 rps over 10%, 30%, 50% and 100% of the keys. Compressed scenarios: `lz4`, 12 compression threads, max 1000 in-flight jobs, unless the name says otherwise. All numbers below come from the raw files and are checked by `bench/analyze.py`; full tables: `bench/RESULTS-2026-10-18.md`.
 
-| Scenario | used_memory / RSS after watch | compressed | t99 | keys checked | SET rps / p99 ms | GET all keys: rps / p50 / p90 / p99 / p999 ms |
-|---|---|---|---|---|---|---|
-| `baseline-off` | 2.17 / 2.40 GiB | 0 | - | 0 | 892003 / 2.959 | 99959 / 0.168 / 0.315 / 0.457 / 0.727 |
-| `cursor-base` (500 samples) | 1.07 / 1.13 GiB | 1000000 | 362 s | 2800451 | 883023 / 3.023 | 99961 / 0.202 / 0.803 / 2.831 / 3.647 |
-| `cursor-samples2000` | 1.06 / 1.13 GiB | 1000000 | 209 s | 6310632 | 907712 / 2.927 | 95738 / 0.247 / 0.707 / 10.559 / 11.455 |
-| `cursor-if100` (max 100 jobs) | 1.63 / 2.52 GiB | 487583 | not reached | 1070211 | 898738 / 2.943 | 99951 / 0.248 / 0.687 / 1.519 / 2.143 |
-| `random-base` (500 samples) | 1.18 / 2.07 GiB | 897046 | not reached | 2988000 | 906067 / 2.911 | 99959 / 0.183 / 0.397 / 2.383 / 3.247 |
-| `random-samples2000` | 1.06 / 1.13 GiB | 999895 | 352 s | 11802752 | 923813 / 2.863 | 97285 / 0.214 / 0.647 / 8.895 / 10.751 |
+> **Enable active defrag (`activedefrag yes`) to bring RSS down. Without it, RSS stays high when only part of the values is compressed.**
 
-t99: seconds after the load until 99% of the 1,000,000 values are compressed (600 s window).
+| Scenario | used_memory | compressed | t99 | keys checked | SET rps / p99 ms | GET all keys: rps / p50 / p90 / p99 / p999 ms |
+|---|---|---|---|---|---|---|
+| `baseline-off` | 2.17 GiB | 0 | - | 0 | 892003 / 2.959 | 99959 / 0.168 / 0.315 / 0.457 / 0.727 |
+| `cursor-base` (500 samples) | 1.07 GiB | 1000000 | 362 s | 2800451 | 883023 / 3.023 | 99961 / 0.202 / 0.803 / 2.831 / 3.647 |
+| `cursor-samples2000` | 1.06 GiB | 1000000 | 209 s | 6310632 | 907712 / 2.927 | 95738 / 0.247 / 0.707 / 10.559 / 11.455 |
+| `cursor-if100` (max 100 jobs) | 1.63 GiB | 487583 | not reached | 1070211 | 898738 / 2.943 | 99951 / 0.248 / 0.687 / 1.519 / 2.143 |
+| `random-base` (500 samples) | 1.18 GiB | 897046 | not reached | 2988000 | 906067 / 2.911 | 99959 / 0.183 / 0.397 / 2.383 / 3.247 |
+| `random-samples2000` | 1.06 GiB | 999895 | 352 s | 11802752 | 923813 / 2.863 | 97285 / 0.214 / 0.647 / 8.895 / 10.751 |
+
+used_memory: after the 600 s watch. t99: seconds after the load until 99% of the 1,000,000 values are compressed (600 s window).
 
 **Results.**
 - **Memory:** -50.8% `used_memory` (2.17 -> 1.07 GiB), and RSS follows when all values are compressed (`cursor-base`: 2.47 GiB after the load, 1.13 GiB after the watch). With 48.8% (`cursor-if100`) or 89.7% (`random-base`) compressed, RSS stays at 2.52 GiB or 2.07 GiB, because freed values leave holes in pages (active defrag off).
