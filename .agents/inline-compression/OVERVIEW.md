@@ -50,14 +50,14 @@ Branch `valkey-inline-compression` (fork `eifrah-aws/valkey`). Design: `design-d
 
 > **Enable active defrag (`activedefrag yes`) to bring RSS down. Without it, RSS stays high when only part of the values is compressed.**
 
-| Scenario | used_memory | compressed | t99 | keys checked | SET rps / p99 ms | GET all keys: rps / p50 / p90 / p99 / p999 ms |
+| Scenario | used_memory | compressed | t99 | keys checked | SET rps / p99 | GET all keys: rps / p50 / p90 / p99 / p999 |
 |---|---|---|---|---|---|---|
-| `baseline-off` | 2.17 GiB | 0 | - | 0 | 892003 / 2.959 | 99959 / 0.168 / 0.315 / 0.457 / 0.727 |
-| `cursor-base` (500 samples) | 1.07 GiB | 1000000 | 362 s | 2800451 | 883023 / 3.023 | 99961 / 0.202 / 0.803 / 2.831 / 3.647 |
-| `cursor-samples2000` | 1.06 GiB | 1000000 | 209 s | 6310632 | 907712 / 2.927 | 95738 / 0.247 / 0.707 / 10.559 / 11.455 |
-| `cursor-if100` (max 100 jobs) | 1.63 GiB | 487583 | not reached | 1070211 | 898738 / 2.943 | 99951 / 0.248 / 0.687 / 1.519 / 2.143 |
-| `random-base` (500 samples) | 1.18 GiB | 897046 | not reached | 2988000 | 906067 / 2.911 | 99959 / 0.183 / 0.397 / 2.383 / 3.247 |
-| `random-samples2000` | 1.06 GiB | 999895 | 352 s | 11802752 | 923813 / 2.863 | 97285 / 0.214 / 0.647 / 8.895 / 10.751 |
+| `baseline-off` | 2.17 GiB | 0 | - | 0 | 892.00K / 2.959 ms | 99.96K / 0.168 ms / 0.315 ms / 0.457 ms / 0.727 ms |
+| `cursor-base` (500 samples) | 1.07 GiB | 1.00M | 362 s | 2.80M | 883.02K / 3.023 ms | 99.96K / 0.202 ms / 0.803 ms / 2.831 ms / 3.647 ms |
+| `cursor-samples2000` | 1.06 GiB | 1.00M | 209 s | 6.31M | 907.71K / 2.927 ms | 95.74K / 0.247 ms / 0.707 ms / 10.559 ms / 11.455 ms |
+| `cursor-if100` (max 100 jobs) | 1.63 GiB | 487.58K | not reached | 1.07M | 898.74K / 2.943 ms | 99.95K / 0.248 ms / 0.687 ms / 1.519 ms / 2.143 ms |
+| `random-base` (500 samples) | 1.18 GiB | 897.05K | not reached | 2.99M | 906.07K / 2.911 ms | 99.96K / 0.183 ms / 0.397 ms / 2.383 ms / 3.247 ms |
+| `random-samples2000` | 1.06 GiB | 999.90K | 352 s | 11.80M | 923.81K / 2.863 ms | 97.29K / 0.214 ms / 0.647 ms / 8.895 ms / 10.751 ms |
 
 used_memory: after the 600 s watch. t99: seconds after the load until 99% of the 1,000,000 values are compressed (600 s window).
 
