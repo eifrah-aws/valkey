@@ -32,10 +32,10 @@ done. `[NOT STARTED]` means no work has started.
 10. [DONE] Phase 3b - `DEBUG COMPRESS-KEY`, free path stub, tests for keyspace events and object free and size (`a2453fe85`).
 11. [DONE] Phase 5 - Cursor sweeper policy (`compression-sweeper-policy`), `COMPRESSOR_SAMPLES_PER_CRON` 500 (`21033ad76`).
 12. [DONE] Phase 5 - Sweeper backoff, `cursor` only: pause after a pass with less than 1% eligible keys (`compression-sweeper-backoff-seconds`).
-13. [WIP] Phase 5 - Benchmark `cursor` and `random`, then choose the defaults. Done: `compression-sweeper-samples` is now a setting (was `COMPRESSOR_SAMPLES_PER_CRON`). Left: the benchmark script and the runs.
+13. [WIP] Phase 5 - Benchmark `cursor` and `random`, then choose the defaults. Done: `compression-sweeper-samples` is now a setting (was `COMPRESSOR_SAMPLES_PER_CRON`), the benchmark script and checker (`bench/compression-bench.sh`, `bench/analyze.py`), and two runs on 2026-10-18 (`bench/RESULTS-2026-10-18.md`, 15 scenarios, and `bench/RESULTS-2026-10-18-defrag.md`, 3 scenarios with active defrag). Left: choose the defaults (`OVERVIEW.md`, "Still to do" item 1), and repeat runs for the noise.
 14. [NOT STARTED] Phase 5 - Magic-byte skip table for data that is already compressed.
 15. [NOT STARTED] Phase 5 - Check `CLIENT PAUSE WRITE` and replicas, and the missing sweeper tests.
-16. [WIP] Phase 6 - RDB and AOF persistence: a new RDB type that saves frames as they are. Done: RDB 82 with `RDB_TYPE_STRING_COMPRESSED`, save and load, tests. Left: the dictionary section (with Phase 10), a "save as plain" switch for downgrade.
+16. [WIP] Phase 6 - RDB and AOF persistence: a new RDB type that saves frames as they are. Done: RDB 82 with `RDB_TYPE_STRING_COMPRESSED`, save and load, tests (`f36b501ac`). Left: the dictionary section (with Phase 10), a "save as plain" switch for downgrade, a fixed RDB fixture.
 17. [NOT STARTED] Phase 7 - Compress on import and on replica apply (no memory spike).
 18. [NOT STARTED] Phase 8 - Measurements.
 19. [NOT STARTED] Phase 9 - Documentation.
@@ -98,7 +98,7 @@ are decided, or are open until the matching phase.
    compression. Keep the `compressor_*` prefix for all new files. `INFO
    compression` does not clash with any other INFO section (checked). Check
    the `COMPRESSION` command name in Phase 11.
-5. **RDB version.** Current `RDB_VERSION` is 81. Phase 6 bumps it.
+5. **RDB version.** Phase 6 changed `RDB_VERSION` from 81 to 82.
 6. **zstd is not vendored, but it is already an optional system library.**
    `src/Makefile` has `BUILD_ZSTD` (default `no`, static libzstd >= 1.4.7),
    used by `src/compression_zstd.c` under `HAVE_ZSTD`. Phase 11 should reuse
@@ -301,7 +301,7 @@ Commit `14df64e73`.
   `compressorStringObjectFreed()`.
 - `CONFIG RESETSTAT` resets the counters, not the gauges. Gauges and counters
   are two structs, so the reset never writes the gauges (review finding).
-- Phase 6 (RDB load of frames) must add loaded frames to the gauges.
+- RDB load of frames adds them to the gauges (`compressorCreateStringObjectFromFrame()`, Phase 6).
 - Tests: `tests/unit/compression-info.tcl` (11 tests), including checks that
   the counters add up.
   `src/unit/test_compressor_stats.cpp` (4 tests).
@@ -457,8 +457,12 @@ Done:
   `rdbver >= 82`. `rdbSaveObject()` writes the frame length and the frame
   bytes, without LZF. An older target (a full sync to a 9.2 replica) gets
   `RDB_TYPE_STRING` and the plain bytes, as before.
-- Load: `rdbLoadObject()` reads the frame and calls
-  `compressorCreateStringObjectFromFrame()`. It checks the header (algorithm,
+- The code is in `compressor_object.c`, so `rdb.c` has only three small
+  hooks: `compressorRdbSaveCompressedString()` (frame length and bytes) and
+  `compressorRdbLoadCompressedString()` (read, check, report a corrupt RDB).
+  `rdbReportError()` is now declared in `rdb.h` for the load helper.
+- Load: `rdbLoadObject()` calls `compressorRdbLoadCompressedString()`, which
+  reads the frame and calls `compressorCreateStringObjectFromFrame()`. It checks the header (algorithm,
   format version, length, `original_encoding` RAW, `dict_id` 0, a backend in
   this build), decompresses the body once into a temporary buffer (a RESTORE
   payload comes from a client, and a read stops the server on a bad frame),
@@ -472,6 +476,8 @@ Done:
   sync, a fake 9.2 and 9.3 replica), and two unit tests in
   `test_compressor_object.cpp`. `compression-encoding.tcl`: the full sync
   test now expects a compressed value on the replica.
+  `corrupt-dump-fuzzer.tcl` runs with `compression-mode lz4` and has a
+  compressed key, so the fuzzer also corrupts frames (review finding).
 
 Left from the list below: the dictionary section (it can come with Phase 10,
 because RDB 82 is not released), the "save as plain" switch for downgrade,
@@ -526,13 +532,15 @@ Goal: no memory spike during migration and replica catch-up.
   key and its LFU counter goes up, so the key arrives hot until the counter
   decays. Compress on import fixes this. If that is not done, check that
   commands from the import source do not touch LRU/LFU.
-- Slot migration and `DUMP` / `MIGRATE` / `RESTORE` send plain bytes in v1
-  (the current code, no change). Replication full sync uses the RDB, so it
-  follows Phase 6. The replication stream carries client writes, which are
-  plain. The child decompresses each
-  value into a temporary buffer while it writes it. The stored value on the
-  source does not change. The target's sweeper compresses the value later,
-  when its compression is on. This works with any target version.
+- Slot migration sends plain bytes in v1 (the current code, no change). The
+  child decompresses each value into a temporary buffer while it writes it.
+  The stored value on the source does not change. The target's sweeper
+  compresses the value later, when its compression is on. This works with
+  any target version.
+- `DUMP` / `MIGRATE` / `RESTORE` and replication full sync use the RDB
+  format, so since Phase 6 they send frames as they are (a replica with an
+  older RDB version gets plain bytes). The replication stream carries client
+  writes, which are plain.
 - Later, only if the bandwidth matters: send frames as they are, but only to
   a target that can read them. Notes for that work:
   - `CLUSTER SYNCSLOTS CAPA` is a one-way message with no reply. The target
@@ -542,7 +550,7 @@ Goal: no memory spike during migration and replica catch-up.
     `+OK frames` to `ESTABLISH`. An old source accepts any reply that does
     not start with `-`.
   - The snapshot is AOF commands. A frame needs `RESTORE key 0 <payload>
-    REPLACE` with the new RDB type of Phase 6, so this comes after Phase 6.
+    REPLACE` with `RDB_TYPE_STRING_COMPRESSED` (Phase 6, done).
 - Tests: cluster test for slot migration with compression on the target
   only; replication test with compression on the replica only;
   `DEBUG DIGEST` equal on both sides.
@@ -638,22 +646,78 @@ Goal: default algorithm and trained dictionaries.
 Today `compression-mode` can not be used with
 `forkless-infrastructure-enabled yes`: the server refuses to start
 (`compressorConfigCheck()`), and the forkless setting can not change at
-runtime. So the problems below can not happen now. Fix them first, then
-remove the startup refusal. They were found in the audit of Phase 3b:
+runtime. So the problems below can not happen now.
 
-- `tryCloneDbEntry()` (`bgiteration.c`) copies the frame bytes into a plain
-  string when it clones a value, so the RDB gets frame bytes as the user
-  value. Do not clone compressed values, or clone the plain bytes.
-- The save thread decompresses with the main-thread compressor and updates
-  non-atomic counters (`rdbSaveStringObject()` on the forkless thread). With
-  RDB 82 this happens only for a target with an older RDB version; an RDB 82
-  save writes the frame as it is. Use
-  a per-thread compressor, and skip the counters or make them atomic.
-- A client read (or a module write handle) decompresses in place and frees
-  the frame while the save thread reads it. Treat a value that the forkless
-  thread holds like a child process: give a temporary copy.
-- Tests: a forkless BGSAVE of compressed values, with reads and writes on
-  the same keys during the save; `DEBUG RELOAD` gives the same values.
+How forkless save works (`src/bgiteration.c`, `src/forkless.c`): a thread
+in the same process writes the RDB file, while the main thread runs
+commands. The main thread scans the keyspace and gives each object to the
+save thread. `incrementEntryInuse()` marks it in use and calls
+`incrRefCount()`, so an object that the save thread holds has refcount >= 2.
+A write command to a key that is not saved yet first sends the key to the
+save thread: a small string as a clone (`tryCloneDbEntry()`, the client
+does not wait), anything else as the real object (the client blocks until
+the key is written). Read commands are never blocked.
+
+### Actions
+
+1. **Clone the plain bytes.** `tryCloneDbEntry()` copies
+   `objectGetVal(de)` into a new RAW string. For a compressed value this is
+   the frame, so the RDB gets `RDB_TYPE_STRING` with compressed bytes, and
+   after a restart `GET` returns garbage. The clone pool counter also
+   drifts: it adds the plain length (`stringObjectLen()`) and subtracts the
+   frame length when the clone is freed.
+   - Fix: a helper in `src/compressor/` that builds the clone from the
+     plain bytes (`compressorDecompressToSds()` on the main thread), and a
+     one-line hook in `tryCloneDbEntry()`. Then the clone is a plain string
+     with the plain length, so the pool counter is right too.
+2. **A read must not change an object that the save thread holds.**
+   `bgIteration_blockClientIfRequired()` blocks only write commands. A
+   `GET` on a compressed key that the save thread holds runs at once, and
+   `compressorLookupValue()` decompresses in place (no child process runs).
+   This frees the frame while the save thread may write it to the RDB: a
+   use-after-free.
+   - Fix: in `compressorLookupValue()`, decompress in place only when
+     `objectGetRefcount(val) == 1`. When it is more than 1, return a
+     temporary plain copy (the existing child-save path:
+     `compressorCreatePlainCopy()`, released when the command ends). The
+     check is per key: other keys still decompress in place during the
+     save. The child-save rule stays global, because a child shares all
+     memory pages.
+3. **A module write handle must not decompress an object that the save
+   thread holds.** `VM_OpenKey()` with `VALKEYMODULE_WRITE` calls
+   `lookupKeyWriteWithFlags()` first, which decompresses in place
+   (`LOOKUP_WRITE`), and only then checks `bgIteration_isEntryInuse()` and
+   returns NULL. So the frame is already freed when the key is refused.
+   - Fix: in `compressorLookupValue()`, for `LOOKUP_WRITE`, return the
+     value unchanged when `bgIteration_isEntryInuse(val)` is true. The
+     caller refuses the key anyway. No change in `module.c`.
+4. **Remove the startup refusal** in `compressorConfigCheck()`, and the
+   sentences about it in the design doc (sections 7.2 and 9).
+5. **Tests.**
+   - Tcl, with `forkless-infrastructure-enabled yes` and
+     `bgsave-default-method forkless`, and a slow save (a delay setting,
+     like `rdb-key-save-delay`, if forkless supports one): during the
+     save, `GET` compressed keys that are not saved yet (action 2), `SET`
+     and `APPEND` to small compressed keys that are not saved yet (action
+     1, the clone), and a module write handle on a held key (action 3).
+     After the save, `DEBUG RELOAD` and check every value.
+   - Check that `OBJECT ENCODING` of a key read during the save is still
+     `compressed` (it got a copy).
+   - Run with ASAN, because actions 2 and 3 are use-after-free bugs.
+
+### Not needed (checked)
+
+- **Decompression on the save thread.** Forkless save writes only the RDB
+  file, always with `RDB_VERSION` (`src/forkless.c:101`, `:276`), so an RDB
+  82 save writes the frame as it is and never decompresses. A full sync
+  never uses forkless save; it runs in a forked child, where decompression
+  is safe. If forkless is ever used for a full sync, a replica with an
+  older RDB version brings this problem back (plain bytes would be made on
+  the save thread with the main-thread compressor and non-atomic
+  counters). Then refuse that sync or use a fork for it.
+- **The sweeper.** It skips values with refcount != 1, both when it queues a
+  job and again at install (`canCompressValue()`). An object that the save
+  thread holds has refcount >= 2, so the sweeper never changes it.
 
 ## Off-loading: decompress in the I/O thread (IDEA, not scheduled)
 
