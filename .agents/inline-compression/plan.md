@@ -49,6 +49,47 @@ version. `(v2)`: improvements for the second version. "Phase 2" in
 22. [DONE] Separate task - Forkless save support (see the section below).
 23. [NOT STARTED] (v2) Idea - Lower read cost: decompress in the I/O thread (off-loading), or keep the frame on a read of a cold key.
 24. [NOT STARTED] Idea - Run the whole test suite with compression on (design doc section 10.1).
+25. [NOT STARTED] Split the work into small upstream PRs (see "Upstream PRs" below).
+
+## Upstream PRs (TODO)
+
+The Valkey maintainers want small PRs. The branch has 36 commits and about
+6,200 changed lines, so it goes upstream as a stack of 9 PRs. Each PR builds
+on the one before it, has its own tests, and keeps compression off by
+default, so each one can be merged alone.
+
+| # | PR | Main files | Core files |
+|---|---|---|---|
+| 1 | Design doc + compressor interface + LZ4 backend (a library with no caller) | `design-docs/inline-compression.md`, `compressor_alg*`, `test_compressor_alg.cpp` | build files only |
+| 2 | Compression frame: header, build, parse, checks | `compressor_frame.*`, `test_compressor_frame.cpp` | none |
+| 3 | Encoding + read path + settings: `OBJ_ENCODING_COMPRESSED`, decompress in `lookupKey()`, temporary copies during a child, `DEBUG COMPRESS-KEY`, `compression-mode` and the size settings | `compressor_object.*`, `compressor_config.*` | `object.c`, `db.c`, `server.c`, `config.c`, `debug.c` (small hooks) |
+| 4 | Commands that keep the value compressed (`LOOKUP_NODECOMPRESS`), and the audit fixes (`PFCOUNT`, existence-only lookups) | | `db.c`, `t_string.c`, `hyperloglog.c`, `cluster.c`, `blocked.c` |
+| 5 | Module API: read handles get a copy, `StringDMA` returns NULL, docs, test module | `tests/modules/compression.c` | `module.c` |
+| 6 | Workers + `random` sweeper + `INFO compression`: worker pool, in-flight set, byte compare | `compressor_workers.*`, `compressor_stats.*` | `server.c` (cron and beforeSleep hooks) |
+| 7 | `cursor` policy + backoff + defaults, with the benchmark numbers in the PR text | `compressor_workers.c` | `config.c` |
+| 8 | RDB format: RDB 82, `RDB_TYPE_STRING_COMPRESSED` | `compressor_object.c` | `rdb.c`, `rdb.h`, `valkey-check-rdb.c` |
+| 9 | Forkless save, and incoming keys (replica apply, slot import): two small PRs | | `bgiteration.c`, `db.c`, `config.c`, `server.h` |
+
+Rules:
+
+- Compression stays off by default in every PR. PRs 1 and 2 are libraries
+  with no caller. PR 3 can be used only through `DEBUG COMPRESS-KEY`. The
+  automatic compression comes in PR 6.
+- Each PR brings the tests for its own code, and no test for a later PR
+  (for example, the RDB tests come with PR 8, the forkless tests with PR 9).
+- Build each branch from `unstable` by files, not by cherry-pick: the 36
+  commits mix topics. Copy the files and hunks of the PR
+  (`git checkout valkey-inline-compression -- <files>`), then remove the parts
+  that belong to a later PR.
+- The hardest cut is PR 3 / PR 6: `compressor_object.c` and
+  `compressor_workers.c` refer to each other in a few places (stats, debug).
+  Cut those links with small stubs.
+- PR 1 has the whole design doc, also the v2 parts. Add a note at the top
+  of the PR text: "this PR adds the design doc and the library; the rest
+  comes in the next PRs", so the review stays on the code.
+- Agree on the RDB version and the type number (PR 8) with the maintainers
+  before that PR.
+- Push the branches only to `origin` (`eifrah-aws/valkey`).
 
 ## Phase 0 - Compressor interface and LZ4 backend (DONE, pushed)
 

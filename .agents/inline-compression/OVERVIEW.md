@@ -38,6 +38,7 @@ In order.
 2. Add a "save as plain" option, so that an older Valkey version can load the RDB (downgrade).
 3. Run the full measurements of the design TODOs.
 4. Write the user documentation (`valkey.conf`, INFO fields), and recommend `activedefrag yes` with compression, so RSS follows `used_memory`.
+5. Send the work upstream as a stack of 9 small PRs, each with its own tests and compression off by default (`plan.md`, "Upstream PRs").
 
 ## Phase 2
 
