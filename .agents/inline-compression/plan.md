@@ -32,7 +32,7 @@ done. `[NOT STARTED]` means no work has started.
 10. [DONE] Phase 3b - `DEBUG COMPRESS-KEY`, free path stub, tests for keyspace events and object free and size (`a2453fe85`).
 11. [DONE] Phase 5 - Cursor sweeper policy (`compression-sweeper-policy`), `COMPRESSOR_SAMPLES_PER_CRON` 500 (`21033ad76`).
 12. [DONE] Phase 5 - Sweeper backoff, `cursor` only: pause after a pass with less than 1% eligible keys (`compression-sweeper-backoff-seconds`).
-13. [WIP] Phase 5 - Benchmark `cursor` and `random`, then choose the defaults. Done: `compression-sweeper-samples` is now a setting (was `COMPRESSOR_SAMPLES_PER_CRON`), the benchmark script and checker (`bench/compression-bench.sh`, `bench/analyze.py`), and two runs on 2026-10-18 (`bench/RESULTS-2026-10-18.md`, 15 scenarios, and `bench/RESULTS-2026-10-18-defrag.md`, 3 scenarios with active defrag). Left: choose the defaults (`OVERVIEW.md`, "Still to do" item 1), and repeat runs for the noise.
+13. [DONE] Phase 5 - Benchmark `cursor` and `random`, then choose the defaults. Done: `compression-sweeper-samples` is now a setting (was `COMPRESSOR_SAMPLES_PER_CRON`), the benchmark script and checker (`bench/compression-bench.sh`, `bench/analyze.py`), and two runs on 2026-10-18 (`bench/RESULTS-2026-10-18.md`, 15 scenarios, and `bench/RESULTS-2026-10-18-defrag.md`, 3 scenarios with active defrag). Defaults chosen: `cursor`, 500 samples, and `compression-max-inflight-requests` 1000 (was 100). Repeat runs for the noise go to Phase 8.
 14. [NOT STARTED] Phase 5 - Magic-byte skip table for data that is already compressed.
 15. [NOT STARTED] Phase 5 - Check `CLIENT PAUSE WRITE` and replicas, and the missing sweeper tests.
 16. [WIP] Phase 6 - RDB and AOF persistence: a new RDB type that saves frames as they are. Done: RDB 82 with `RDB_TYPE_STRING_COMPRESSED`, save and load, tests (`f36b501ac`). Left: the dictionary section (with Phase 10), a "save as plain" switch for downgrade, a fixed RDB fixture.
@@ -162,7 +162,7 @@ Configs exist and are checked. Nothing compresses yet.
   - The limits and defaults of the settings.
   - The fixed v1 values of the "advanced (v2)" settings
     (`COMPRESSOR_MIN_SAVINGS_PCT`, `COMPRESSOR_MIN_IDLE_SECONDS`, ...).
-  - Later: `compression-max-inflight-requests` (1-10000, default 100,
+  - Later: `compression-max-inflight-requests` (1-10000, default 100, now 1000,
     can change at runtime) took the place of the fixed
     `COMPRESSOR_MAX_INFLIGHT_REQUESTS`.
   - Later: `compression-lfu-threshold` (0-255, default 4, can change at

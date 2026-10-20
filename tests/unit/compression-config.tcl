@@ -16,7 +16,7 @@ start_server {tags {"compression external:skip"}} {
         assert_equal {compression-min-value-size 256} [r config get compression-min-value-size]
         assert_equal {compression-max-value-size 131072} [r config get compression-max-value-size]
         assert_equal {compression-dict-size 102400} [r config get compression-dict-size]
-        assert_equal {compression-max-inflight-requests 100} [r config get compression-max-inflight-requests]
+        assert_equal {compression-max-inflight-requests 1000} [r config get compression-max-inflight-requests]
         assert_equal {compression-lfu-threshold 4} [r config get compression-lfu-threshold]
         assert_equal {compression-sweeper-policy cursor} [r config get compression-sweeper-policy]
         assert_equal {compression-sweeper-backoff-seconds 60} [r config get compression-sweeper-backoff-seconds]
@@ -53,7 +53,7 @@ start_server {tags {"compression external:skip"}} {
         assert_error "*must be between 1 and 10000*" {r config set compression-max-inflight-requests 0}
         assert_error "*must be between 1 and 10000*" {r config set compression-max-inflight-requests 10001}
         assert_equal {compression-max-inflight-requests 10000} [r config get compression-max-inflight-requests]
-        r config set compression-max-inflight-requests 100
+        r config set compression-max-inflight-requests 1000
     }
 
     test {compression-lfu-threshold can be changed at runtime and has limits} {

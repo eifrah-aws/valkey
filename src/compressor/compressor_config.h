@@ -36,10 +36,12 @@
  * time. A job counts from the moment it is queued until the main thread
  * installs or drops the result. When the limit is reached, the sweeper does
  * not pick new values. Each job holds a copy of the plain value, so with
- * values of at most 128 KiB, the default keeps the copies under 12.5 MiB. */
+ * values of at most 128 KiB, the default keeps the copies under 125 MiB. In
+ * the benchmark, 100 compressed only half of 1M values in 600 s, and 1000
+ * compressed all of them in 362 s. */
 #define COMPRESSOR_MAX_INFLIGHT_REQUESTS_MIN 1
 #define COMPRESSOR_MAX_INFLIGHT_REQUESTS_MAX 10000
-#define COMPRESSOR_MAX_INFLIGHT_REQUESTS_DEFAULT 100
+#define COMPRESSOR_MAX_INFLIGHT_REQUESTS_DEFAULT 1000
 
 /* compression-lfu-threshold: a value is cold when its LFU counter is at most
  * this number. This test is used with LFU eviction, in place of
@@ -77,8 +79,8 @@
  * compressorCron() call. With the cursor policy, it is also the most buckets
  * the scan visits in one call, so a table with many empty buckets does not
  * make the call long. This keeps the work on the main thread small, also
- * when compression-max-inflight-requests is large. The default is not final.
- * It will be set after a benchmark. */
+ * when compression-max-inflight-requests is large. The default comes from
+ * the benchmark (design doc section 6.1.1). */
 #define COMPRESSOR_SWEEPER_SAMPLES_MIN 1
 #define COMPRESSOR_SWEEPER_SAMPLES_MAX 10000
 #define COMPRESSOR_SWEEPER_SAMPLES_DEFAULT 500

@@ -16,7 +16,7 @@ Branch `valkey-inline-compression` (fork `eifrah-aws/valkey`). Design: `design-d
 
 1. LZ4 backend behind a replaceable compressor interface, with one compressor instance per thread.
 2. Compression frame with a 10-byte self-describing header and frame checks.
-3. Settings: mode, threads, value size range, max in-flight jobs, LFU threshold, sweeper policy, samples and backoff.
+3. Settings: mode, threads, value size range, max in-flight jobs, LFU threshold, sweeper policy, samples and backoff; the defaults come from the benchmark (`cursor`, 500 samples, 1000 jobs in flight).
 4. New object encoding and a read path in `lookupKey()`, with temporary copies during a child process and for module read handles.
 5. Worker pool, in-flight set and byte compare at install.
 6. `cursor` sweeper with resume inside a bucket, backoff, and the `random` policy.
@@ -34,15 +34,14 @@ Branch `valkey-inline-compression` (fork `eifrah-aws/valkey`). Design: `design-d
 
 In order.
 
-1. Set the defaults from the benchmark: keep `cursor` with 500 samples, and raise max in-flight jobs from 100 to 1000.
-2. Check the sweeper with `CLIENT PAUSE WRITE` and on replicas, and add the missing sweeper tests.
-3. Add a "save as plain" option, so that an older Valkey version can load the RDB (downgrade).
-4. Skip values that are already compressed (PNG, JPEG, gzip, ...) by their first bytes.
-5. Run the full measurements of the design TODOs.
-6. Add the compression dictionary registry, for better ratios on small values.
-7. Add the zstd backend and dictionary training.
-8. Write the user documentation (`valkey.conf`, INFO fields), and recommend `activedefrag yes` with compression, so RSS follows `used_memory`.
-9. Design a lower read cost: decompress in the I/O threads, or keep the frame on a read of a cold key.
+1. Check the sweeper with `CLIENT PAUSE WRITE` and on replicas, and add the missing sweeper tests.
+2. Add a "save as plain" option, so that an older Valkey version can load the RDB (downgrade).
+3. Skip values that are already compressed (PNG, JPEG, gzip, ...) by their first bytes.
+4. Run the full measurements of the design TODOs.
+5. Add the compression dictionary registry, for better ratios on small values.
+6. Add the zstd backend and dictionary training.
+7. Write the user documentation (`valkey.conf`, INFO fields), and recommend `activedefrag yes` with compression, so RSS follows `used_memory`.
+8. Design a lower read cost: decompress in the I/O threads, or keep the frame on a read of a cold key.
 
 <div style="page-break-after: always;"></div>
 
