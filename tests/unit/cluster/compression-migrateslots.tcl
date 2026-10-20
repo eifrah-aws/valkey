@@ -62,3 +62,41 @@ start_cluster 3 0 {tags {logreqres:skip external:skip cluster network compressio
         assert_equal -1 [R 0 pttl $tag:k1]
     }
 }
+
+# With the default compression-lfu-threshold (4), new keys are hot, so the
+# sweeper does not compress them. The target compresses the imported values at
+# once, through the incoming keys.
+start_cluster 3 0 {tags {logreqres:skip external:skip cluster network compression} overrides {compression-mode lz4 maxmemory-policy allkeys-lfu}} {
+    set tag "{6ZJ}"
+    set n 20
+    set node0_id [R 0 CLUSTER MYID]
+
+    test "The target compresses imported values at once" {
+        for {set i 0} {$i < $n} {incr i} {
+            R 2 set $tag:k$i [migrate_value $i]
+        }
+        R 2 set $tag:t [migrate_value 100] px 1000000
+        # Hot on the source, so plain.
+        assert_equal raw [R 2 object encoding $tag:k0]
+        set queued [migrate_info 0 compression_total_incoming_jobs_queued]
+
+        assert_match "OK" [R 2 CLUSTER MIGRATESLOTS SLOTSRANGE 16383 16383 NODE $node0_id]
+        wait_for_condition 100 100 {
+            [R 0 CLUSTER COUNTKEYSINSLOT 16383] == [expr {$n + 1}] && [R 2 CLUSTER COUNTKEYSINSLOT 16383] == 0
+        } else {
+            fail "slot 16383 was not migrated"
+        }
+        wait_for_cluster_propagation
+
+        for {set i 0} {$i < $n} {incr i} {
+            wait_compressed [Rn 0] $tag:k$i
+        }
+        wait_compressed [Rn 0] $tag:t
+        assert_morethan_equal [migrate_info 0 compression_total_incoming_jobs_queued] [expr {$queued + $n + 1}]
+        assert_equal 0 [migrate_info 0 compression_total_jobs_queued]
+        for {set i 0} {$i < $n} {incr i} {
+            assert_equal [migrate_value $i] [R 0 get $tag:k$i]
+        }
+        assert_morethan [R 0 pttl $tag:t] 0
+    }
+}

@@ -4,12 +4,12 @@ Branch `valkey-inline-compression` (fork `eifrah-aws/valkey`). Design: `design-d
 
 ## Approach
 
-- **Background, not inline.** Writes store plain values as today. A sweeper on the main thread (`compressorCron()`, 10 calls per second) finds cold string values, copies each one into a job, and worker threads compress the copy with LZ4.
+- **Background, not inline.** Writes store plain values as today. A sweeper on the main thread (`compressorCron()`, 10 calls per second) finds cold string values, copies each one into a job, and worker threads compress the copy with LZ4. Values from a primary or a slot import do not wait until they are cold: their key names are queued at once, before the sweeper.
 - **Cold means not used recently,** read from the object's own LRU/LFU field (LFU counter at most `compression-lfu-threshold`, or idle for 60 s); the sweeper never touches that field.
 - **Cursor scan.** The default policy walks all keys with `kvstoreScan()` and keeps its place between calls, so one pass checks each key one time; each call checks at most `compression-sweeper-samples` keys and buckets, and pauses for `compression-sweeper-backoff-seconds` after a pass that finds almost nothing. A `random` policy is kept for comparison.
-- **Safe install.** The main thread installs a result only if the key still holds the same bytes as the copy (`memcmp`), the value is still cold, and the frame saves at least 10% of the allocated memory; no key is locked, so no client waits.
+- **Safe install.** The main thread installs a result only if the key still holds the same bytes as the copy (`memcmp`), the value is still cold (not checked for values from a primary or a slot import), and the frame saves at least 10% of the allocated memory; no key is locked, so no client waits.
 - **Frame.** A compressed value is the same `robj` with the new encoding `OBJ_ENCODING_COMPRESSED` and a 10-byte header (plain length, dictionary id, algorithm, format version, original encoding).
-- **Reads.** `lookupKey()` decompresses in place, so commands do not change; during a child process, or for a module read handle, the read gets a temporary plain copy and the stored frame stays.
+- **Reads.** `lookupKey()` decompresses in place, so commands do not change; during a child process, for a module read handle, or for a key that the forkless save thread holds, the read gets a temporary plain copy and the stored frame stays.
 - **Persistence.** RDB (version 82), full sync, the AOF preamble and `DUMP` keep frames as they are; the replication stream, a command-form AOF and slot migration send plain bytes.
 
 ## Implemented
@@ -27,22 +27,22 @@ Branch `valkey-inline-compression` (fork `eifrah-aws/valkey`). Design: `design-d
 11. `DEBUG COMPRESS-KEY` to compress one key now, for tests.
 12. RDB version 82 with a new type that saves and loads frames as they are (RDB, full sync, AOF preamble, `DUMP`/`RESTORE`/`MIGRATE`), with a load check of every frame; a replica with an older RDB version gets plain bytes.
 13. Forkless save: a read of a key that the save thread holds gets a temporary copy, a write clones the plain bytes, and a module write handle leaves such a key compressed.
-14. Unit tests, Tcl and module tests, and a benchmark script with a checker (`bench/`).
+14. Values from a primary (replica apply) or a slot import are compressed at once, without waiting until they are cold: their key names go to a queue, and the workers compress them.
+15. Unit tests, Tcl and module tests, and a benchmark script with a checker (`bench/`).
 
 ## Still to do
 
 In order.
 
-1. Compress values on slot-migration import and on replica apply, to avoid a memory spike.
-2. Set the defaults from the benchmark: keep `cursor` with 500 samples, and raise max in-flight jobs from 100 to 1000.
-3. Check the sweeper with `CLIENT PAUSE WRITE` and on replicas, and add the missing sweeper tests.
-4. Add a "save as plain" option, so that an older Valkey version can load the RDB (downgrade).
-5. Skip values that are already compressed (PNG, JPEG, gzip, ...) by their first bytes.
-6. Run the full measurements of the design TODOs.
-7. Add the compression dictionary registry, for better ratios on small values.
-8. Add the zstd backend and dictionary training.
-9. Write the user documentation (`valkey.conf`, INFO fields), and recommend `activedefrag yes` with compression, so RSS follows `used_memory`.
-10. Design a lower read cost: decompress in the I/O threads, or keep the frame on a read of a cold key.
+1. Set the defaults from the benchmark: keep `cursor` with 500 samples, and raise max in-flight jobs from 100 to 1000.
+2. Check the sweeper with `CLIENT PAUSE WRITE` and on replicas, and add the missing sweeper tests.
+3. Add a "save as plain" option, so that an older Valkey version can load the RDB (downgrade).
+4. Skip values that are already compressed (PNG, JPEG, gzip, ...) by their first bytes.
+5. Run the full measurements of the design TODOs.
+6. Add the compression dictionary registry, for better ratios on small values.
+7. Add the zstd backend and dictionary training.
+8. Write the user documentation (`valkey.conf`, INFO fields), and recommend `activedefrag yes` with compression, so RSS follows `used_memory`.
+9. Design a lower read cost: decompress in the I/O threads, or keep the frame on a read of a cold key.
 
 <div style="page-break-after: always;"></div>
 

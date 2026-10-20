@@ -142,9 +142,11 @@ def main(run_dir, md_path=None):
                 check(num(snap, "compression_total_keys_eligible") == num(snap, "compression_total_jobs_queued") +
                       num(snap, "compression_total_keys_skipped_already_queued"),
                       f"{name} {label}: eligible != queued + already queued")
-                check(num(snap, "compression_total_jobs_queued") == num(snap, "compression_total_values_compressed") +
+                # Older builds have no incoming jobs (replica apply, slot import).
+                incoming = float(snap.get("compression_total_incoming_jobs_queued", 0))
+                check(num(snap, "compression_total_jobs_queued") + incoming == num(snap, "compression_total_values_compressed") +
                       num(snap, "compression_total_values_dropped") + num(snap, "compression_jobs_in_flight"),
-                      f"{name} {label}: queued != compressed + dropped + in flight")
+                      f"{name} {label}: queued + incoming != compressed + dropped + in flight")
                 check(num(snap, "compression_saved_bytes") == num(snap, "compressed_values_original_bytes") -
                       num(snap, "compressed_values_bytes"), f"{name} {label}: saved != original - frames")
             # No client reads during the watch, so the count only goes up.

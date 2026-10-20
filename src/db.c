@@ -29,6 +29,7 @@
 
 #include "server.h"
 #include "compressor/compressor_object.h"
+#include "compressor/compressor_workers.h"
 #include "listpack.h"
 #include "hotkeys.h"
 #include "ordered_index.h"
@@ -793,6 +794,7 @@ void signalModifiedKey(client *c, serverDb *db, robj *key) {
     touchWatchedKey(db, key);
     trackingInvalidateKey(c, key, 1);
     bgIteration_keyModified(db->id, objectGetVal(key));
+    compressorKeyModified(c, db, key);
 }
 
 void signalFlushedDb(int dbid, int async) {

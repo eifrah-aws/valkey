@@ -55,6 +55,7 @@ sds compressorStatsInfo(sds info) {
         "compressed_values_bytes:%llu\r\n"
         "compression_saved_bytes:%llu\r\n"
         "compression_jobs_in_flight:%lu\r\n"
+        "compression_incoming_pending_keys:%lu\r\n"
         "compression_sweeper_paused:%d\r\n"
         "compression_temporary_copies:%lu\r\n"
         "compression_total_keys_checked:%llu\r\n"
@@ -66,6 +67,7 @@ sds compressorStatsInfo(sds info) {
         "compression_total_keys_skipped_hot:%llu\r\n"
         "compression_total_keys_skipped_already_queued:%llu\r\n"
         "compression_total_jobs_queued:%llu\r\n"
+        "compression_total_incoming_jobs_queued:%llu\r\n"
         "compression_total_values_compressed:%llu\r\n"
         "compression_total_values_dropped:%llu\r\n"
         "compression_total_values_dropped_low_saving:%llu\r\n"
@@ -79,9 +81,9 @@ sds compressorStatsInfo(sds info) {
         "compression_total_temporary_copies_made:%llu\r\n"
         "compression_total_decompression_time_us:%llu\r\n",
         compressorAlgIdName(server.compression_mode), server.compression_threads, values, original, frames,
-        original > frames ? original - frames : 0, compressorJobsInFlight(), compressorSweeperIsPaused() ? 1 : 0, compressor_plain_copies, st->compression_total_keys_checked,
+        original > frames ? original - frames : 0, compressorJobsInFlight(), compressorIncomingPendingKeys(), compressorSweeperIsPaused() ? 1 : 0, compressor_plain_copies, st->compression_total_keys_checked,
         st->compression_total_keys_eligible, st->compression_total_keys_skipped_already_compressed, st->compression_total_keys_skipped_not_string, st->compression_total_keys_skipped_in_use, st->compression_total_keys_skipped_size,
-        st->compression_total_keys_skipped_hot, st->compression_total_keys_skipped_already_queued, st->compression_total_jobs_queued, st->compression_total_values_compressed, dropped,
+        st->compression_total_keys_skipped_hot, st->compression_total_keys_skipped_already_queued, st->compression_total_jobs_queued, st->compression_total_incoming_jobs_queued, st->compression_total_values_compressed, dropped,
         st->compression_total_values_dropped_low_saving, st->compression_total_values_dropped_changed,
         st->compression_total_values_dropped_not_eligible, st->compression_total_sweeps_paused_by_child, st->compression_total_sweeper_passes, st->compression_total_sweeper_backoffs, st->compression_total_compression_time_us,
         st->compression_total_values_decompressed, st->compression_total_temporary_copies_made, st->compression_total_decompression_time_us);

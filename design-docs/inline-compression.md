@@ -26,7 +26,7 @@ Candidate selection and frame installation remain coordinated with the main even
 
 ## 3. Data entering Valkey
 
-Data enters Valkey through five paths. Client commands, slot migration, incremental replication, and command-form AOF replay carry logical, uncompressed values. RDB load and an RDB-format AOF base file preserve the stored representation. Client writes rely on background compression. Slot-migration imports and replication-stream updates compress eligible values inline, which prevents a large transfer or catch-up operation from building an uncompressed copy of the dataset.
+Data enters Valkey through five paths. Client commands, slot migration, incremental replication, and command-form AOF replay carry logical, uncompressed values. RDB load and an RDB-format AOF base file preserve the stored representation. Client writes rely on background compression. Slot-migration imports and replication-stream updates compress eligible values at once, without waiting until they are cold, which prevents a large transfer or catch-up operation from building an uncompressed copy of the dataset.
 
 ### 3.1 Client write commands
 
@@ -36,9 +36,11 @@ A command that mutates a compressed value first gets its logical, uncompressed r
 
 ### 3.2 Slot migration import
 
-Slot migration receives uncompressed logical values. When compression is enabled, the destination compresses each eligible value inline before final installation. It uses the destination's algorithm and active dictionary when applicable. It also applies the same size, format, and net-savings checks as the background path. If the value is ineligible or compression provides no saving, the destination installs it as plain data.
+Slot migration receives uncompressed logical values. When compression is enabled, the destination compresses each eligible value at once, without the coldness test of the sweeper. It uses the destination's algorithm and active dictionary when applicable. It also applies the same size, format, and net-savings checks as the background path. If the value is ineligible or compression provides no saving, the value stays plain.
 
-This inline compression is deliberate. Installing every migrated value as plain data and waiting for the sweeper could cause a memory spike proportional to the imported slot. Processing one value at a time limits additional plaintext memory to the value being imported. It also keeps the destination independent of the source node's algorithm and dictionary set.
+The import client installs the plain value as usual. `signalModifiedKey()` then calls `compressorKeyModified()`, which adds only the key name to a set of incoming keys (no value copy, and one entry per key however often it is written). On each event loop (`compressorBeforeSleep()`) and each cron call, the main thread takes keys from the set, oldest first, while there is room in `compression-max-inflight-requests`, and queues normal compression jobs for them (§6.2). The jobs are marked, so the install skips the coldness test, but keeps the byte compare and the net-savings guard (§6.3, §6.4). Incoming keys go before the sweeper. A key that is deleted or changed while it waits is skipped, or its frame is dropped at install. A key that already has a job in flight (from the sweeper, or for an older value) stays in the set and is tried again after that job is done, because that job is dropped at install when the value changed.
+
+Not waiting is deliberate. Installing every migrated value as plain data and waiting for the sweeper could cause a memory spike proportional to the imported slot: a new key is hot, and the snapshot touches a key with a TTL a second time (`PEXPIREAT`). With the queue, the extra plain memory is the values that wait for a worker. The import is not slowed down by compression on the main thread. It also keeps the destination independent of the source node's algorithm and dictionary set.
 
 > **TODO — validate inline migration compression with measurements:** quantify destination peak memory, migration throughput, per-value latency, and event-loop occupancy across value sizes and compression ratios.
 
@@ -52,11 +54,11 @@ Persisting frames creates a long-term compatibility obligation and requires an R
 
 ### 3.4 Replication stream application
 
-Incremental replication carries normal Valkey commands and uncompressed logical values. When compression is enabled on the replica, each command that creates or replaces an eligible value compresses the resulting value inline before final installation. A mutation of an existing compressed value obtains its logical representation, applies the command, and inline-compresses the result when eligible. The replica uses its local algorithm and active dictionary when applicable; it does not need the primary's dictionary for incremental updates.
+Incremental replication carries normal Valkey commands and uncompressed logical values. When compression is enabled on the replica, each command from the primary that creates or replaces an eligible value adds the key to the incoming keys, as in §3.2, and the result is compressed at once by the workers. A mutation of an existing compressed value obtains its logical representation, applies the command, and the result is compressed again when eligible. Only the primary client and slot-import clients add incoming keys; a normal client write waits for the sweeper. The replica uses its local algorithm and active dictionary when applicable; it does not need the primary's dictionary for incremental updates.
 
-Inline compression prevents replication catch-up from building an unintended uncompressed copy of the changed dataset while waiting for a later sweep. Values that are ineligible or do not pass the net-savings guard remain plain. Primary and replica may therefore use different physical representations while retaining the same logical dataset.
+Compressing at once prevents replication catch-up from building an unintended uncompressed copy of the changed dataset while waiting for a later sweep. The cost: each write from the primary to an eligible value is one compression job, and a read on the replica decompresses it again, so a write-heavy workload costs more CPU on a replica. Values that are ineligible or do not pass the net-savings guard remain plain. Primary and replica may therefore use different physical representations while retaining the same logical dataset.
 
-During full synchronization, the incoming snapshot follows §3.3: compressed and plain values are loaded as-is together with all referenced dictionaries. Commands buffered after the snapshot offset then arrive through the uncompressed incremental stream and follow the inline-compression rule above.
+During full synchronization, the incoming snapshot follows §3.3: compressed and plain values are loaded as-is together with all referenced dictionaries. Commands buffered after the snapshot offset then arrive through the uncompressed incremental stream and follow the rule above.
 
 > **TODO — validate inline replication compression with measurements:** quantify replica peak memory, apply throughput, replication lag, event-loop occupancy, and catch-up time with and without inline compression.
 
@@ -496,6 +498,7 @@ All counters change only on the main thread, so they need no atomics. A worker w
 | `compressed_values_bytes` | Gauge | bytes | Memory those values use now (allocation size). |
 | `compression_saved_bytes` | Gauge | bytes | Memory saved now: `compressed_values_original_bytes - compressed_values_bytes`. |
 | `compression_jobs_in_flight` | Gauge | jobs | Values waiting for compression, being compressed, or waiting to be installed. |
+| `compression_incoming_pending_keys` | Gauge | keys | Incoming keys (replica apply, slot import, §3.2) that wait for a job. |
 | `compression_sweeper_paused` | Gauge | 0 or 1 | 1 while the `cursor` sweeper is in its backoff pause (section 6.1). |
 | `compression_temporary_copies` | Gauge | values | Temporary plain copies alive now (§7.2). |
 | `compression_total_keys_checked` | Counter | keys | Keys the sweeper looked at. |
@@ -506,7 +509,8 @@ All counters change only on the main thread, so they need no atomics. A worker w
 | `compression_total_keys_skipped_size` | Counter | keys | Skipped: size outside `compression-min-value-size` to `compression-max-value-size`. |
 | `compression_total_keys_skipped_hot` | Counter | keys | Skipped: clients used the key recently (not cold). |
 | `compression_total_keys_skipped_already_queued` | Counter | keys | Eligible, but the key is already in the queue. |
-| `compression_total_jobs_queued` | Counter | jobs | Values sent to the workers. |
+| `compression_total_jobs_queued` | Counter | jobs | Values sent to the workers by the sweeper. |
+| `compression_total_incoming_jobs_queued` | Counter | jobs | Incoming values sent to the workers (§3.2, §3.4). |
 | `compression_total_values_compressed` | Counter | values | Values compressed and stored. |
 | `compression_total_values_dropped` | Counter | values | Values compressed, then not stored. The total of the three counters below. |
 | `compression_total_values_dropped_low_saving` | Counter | values | Dropped: the saving was under the 10% net-savings guard (§6.4, §9). |
@@ -523,7 +527,7 @@ All counters change only on the main thread, so they need no atomics. A worker w
 How the counters fit together:
 - `compression_total_keys_checked = compression_total_keys_eligible + compression_total_keys_skipped_already_compressed + compression_total_keys_skipped_not_string + compression_total_keys_skipped_in_use + compression_total_keys_skipped_size + compression_total_keys_skipped_hot`
 - `compression_total_keys_eligible = compression_total_jobs_queued + compression_total_keys_skipped_already_queued`
-- `compression_total_jobs_queued = compression_total_values_compressed + compression_total_values_dropped + compression_jobs_in_flight`
+- `compression_total_jobs_queued + compression_total_incoming_jobs_queued = compression_total_values_compressed + compression_total_values_dropped + compression_jobs_in_flight`
 
 Implementation notes (`src/compressor/compressor_stats.{h,c}`):
 - `compression` is not a default INFO section. `INFO compression`, `INFO all`, and `INFO everything` show it. A plain `INFO` does not, so its output does not change.

@@ -23,7 +23,7 @@ proc cinfo_check_totals {} {
                compression_total_keys_skipped_in_use compression_total_keys_skipped_size compression_total_keys_skipped_hot compression_total_keys_skipped_already_queued
                compression_total_jobs_queued compression_total_values_compressed compression_total_values_dropped
                compression_total_values_dropped_low_saving compression_total_values_dropped_changed
-               compression_total_values_dropped_not_eligible compression_jobs_in_flight} {
+               compression_total_values_dropped_not_eligible compression_jobs_in_flight compression_total_incoming_jobs_queued} {
         set v($f) [getInfoProperty $info $f]
     }
     set skipped [expr {$v(compression_total_keys_skipped_already_compressed) + $v(compression_total_keys_skipped_not_string) +
@@ -33,8 +33,8 @@ proc cinfo_check_totals {} {
     assert_equal $v(compression_total_values_dropped) [expr {$v(compression_total_values_dropped_low_saving) +
                                                           $v(compression_total_values_dropped_changed) +
                                                           $v(compression_total_values_dropped_not_eligible)}]
-    assert_equal $v(compression_total_jobs_queued) [expr {$v(compression_total_values_compressed) + $v(compression_total_values_dropped) +
-                                          $v(compression_jobs_in_flight)}]
+    assert_equal [expr {$v(compression_total_jobs_queued) + $v(compression_total_incoming_jobs_queued)}] \
+        [expr {$v(compression_total_values_compressed) + $v(compression_total_values_dropped) + $v(compression_jobs_in_flight)}]
 }
 
 start_server {tags {"compression external:skip"}} {

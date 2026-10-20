@@ -36,7 +36,7 @@ done. `[NOT STARTED]` means no work has started.
 14. [NOT STARTED] Phase 5 - Magic-byte skip table for data that is already compressed.
 15. [NOT STARTED] Phase 5 - Check `CLIENT PAUSE WRITE` and replicas, and the missing sweeper tests.
 16. [WIP] Phase 6 - RDB and AOF persistence: a new RDB type that saves frames as they are. Done: RDB 82 with `RDB_TYPE_STRING_COMPRESSED`, save and load, tests (`f36b501ac`). Left: the dictionary section (with Phase 10), a "save as plain" switch for downgrade, a fixed RDB fixture.
-17. [NOT STARTED] Phase 7 - Compress on import and on replica apply (no memory spike).
+17. [DONE] Phase 7 - Compress on import and on replica apply (no memory spike), through a queue of incoming keys.
 18. [NOT STARTED] Phase 8 - Measurements.
 19. [NOT STARTED] Phase 9 - Documentation.
 20. [NOT STARTED] Phase 10 - Dictionary registry.
@@ -519,6 +519,53 @@ The original plan:
 ## Phase 7 - Inline compression on import and replica apply (RESTORE, MIGRATE)
 
 Goal: no memory spike during migration and replica catch-up.
+
+Done, with the queue option (the user chose it over compression on the main
+thread):
+
+- Hook: one line in `signalModifiedKey()` (`db.c`) calls
+  `compressorKeyModified()` (`compressor_workers.c`). When compression is on
+  and the client is the primary or a slot-import client
+  (`getClientType()`), it adds the key name (db id + key) to
+  `incoming_keys` (a set, so one entry per key) and `incoming_order` (a
+  fifo). No value copy.
+- Drain: `queueIncomingKeys()` from `compressorBeforeSleep()` (after the
+  installs) and from `compressorCron()` (before the sweeper). Oldest first,
+  up to `compression-sweeper-samples` keys per call, while the in-flight
+  limit has room. A key that is gone or can not be compressed
+  (`canCompressValue()`) is dropped from the set. A key that already has a
+  job in flight (`queueJob()` fails with `EEXIST`) stays in the set and goes
+  to the end of the queue, and is tried again in a later call, once per
+  call (review finding: the old job is dropped at install when the value
+  changed, so the newest value needs its own job). Paused during a child
+  process and during loading, like the sweeper.
+- Test-only hidden setting `compression-debug-job-delay` (microseconds a
+  worker waits before each job, like `rdb-key-save-delay`), so a test can
+  keep a job in flight. Also useful for the missing sweeper tests (a write
+  while its job runs, `FLUSHALL` while a job runs).
+- Jobs are marked `incoming`, so `installJob()` uses `canCompressValue()`
+  (no coldness test). The byte compare and the net-savings guard stay.
+- INFO: gauge `compression_incoming_pending_keys`, counter
+  `compression_total_incoming_jobs_queued`. The sum is now
+  `jobs_queued + incoming_jobs_queued = compressed + dropped + in_flight`
+  (`compression-info.tcl` and `bench/analyze.py` check it).
+- Tests: `tests/integration/compression-incoming.tcl` (a replica compresses
+  hot values from its primary, `DEBUG DIGEST` equal, APPEND, values that can
+  not be compressed, keys that wait during a child and are deleted or
+  changed, FLUSHALL while keys wait, a normal client write is not
+  incoming, a key written again while its job runs gets a new job), and a second cluster in
+  `tests/unit/cluster/compression-migrateslots.tcl` (the target compresses
+  hot imported values, also one with a TTL). Each test fails without the
+  hook (checked).
+- Not covered: `RESTORE` from the old `MIGRATE` command runs on a normal
+  client, so a plain value waits for the sweeper. A value that was
+  compressed on the source arrives compressed (RDB 82 payload).
+- Risk for Phase 8: on a replica, each write from the primary to an
+  eligible value is one compression job, and a read on the replica
+  decompresses it again. Measure the CPU cost with a write-heavy load. If
+  needed, add a setting to turn compression on apply off.
+
+The original plan:
 
 - Slot migration import (atomic slot migration and `RESTORE`-based
   `MIGRATE`): compress each eligible value before install.

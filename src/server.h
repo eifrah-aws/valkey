@@ -2494,6 +2494,7 @@ struct valkeyServer {
     int compression_sweeper_policy;          /* COMPRESSOR_SWEEPER_POLICY_* */
     int compression_sweeper_samples;         /* most keys the sweeper checks in one cron call */
     int compression_sweeper_backoff_seconds; /* pause after a pass with almost no work, 0 = off */
+    int compression_debug_job_delay;         /* for tests: microseconds a worker waits before each job */
     /* Lazy free */
     int lazyfree_lazy_eviction;
     int lazyfree_lazy_expire;

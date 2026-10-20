@@ -13,6 +13,7 @@
 #include "compressor/compressor_object.h"
 #include "compressor/compressor_stats.h"
 #include "lrulfu.h"
+#include "fifo.h"
 #include "mutexqueue.h"
 #include "mt19937-64.h"
 #include "monotonic.h"
@@ -31,6 +32,7 @@ typedef struct compressorJob {
     sds input;             /* Own copy of the plain value. Kept until install, for the compare. */
     sds frame;             /* Set by the worker. NULL when the value does not get smaller. */
     long long compress_us; /* Set by the worker: time spent compressing. */
+    bool incoming;         /* An incoming key: no coldness test at install. */
 } compressorJob;
 
 static mutexQueue *pending_jobs; /* Main thread to workers. NULL when compression is off. */
@@ -39,6 +41,12 @@ static mutexQueue *done_jobs;    /* Workers to main thread. */
 /* The keys of the jobs that are queued, running, or done but not installed
  * yet, so a key is never in two jobs at once. Main thread only. */
 static hashtable *inflight_keys;
+
+/* The incoming keys (see compressor_workers.h), by inflightName(). The table
+ * owns the names and keeps a key there once; incoming_order holds the same
+ * names in arrival order. Main thread only. */
+static hashtable *incoming_keys;
+static fifo *incoming_order;
 
 static pthread_t worker_threads[COMPRESSOR_THREADS_MAX];
 static int num_workers;
@@ -87,6 +95,8 @@ static void *compressorWorkerMain(void *arg) {
 
     while (1) {
         compressorJob *job = mutexQueuePop(pending_jobs, true);
+        /* For tests: keeps the job in flight longer. */
+        if (server.compression_debug_job_delay) debugDelay(server.compression_debug_job_delay);
         monotime start = getMonotonicUs();
         job->frame = compressorFrameBuild(c, OBJ_ENCODING_RAW, job->input, sdslen(job->input), NULL);
         job->compress_us = (long long)(getMonotonicUs() - start);
@@ -107,6 +117,8 @@ int compressorWorkersInit(void) {
     pending_jobs = mutexQueueCreate();
     done_jobs = mutexQueueCreate();
     inflight_keys = hashtableCreate(&setHashtableType);
+    incoming_keys = hashtableCreate(&setHashtableType);
+    incoming_order = fifoCreate();
 
     pthread_attr_t attr;
     serverInitThreadAttribute(&attr);
@@ -207,7 +219,7 @@ static void countSkippedKey(int err) {
 
 /* Queues a job for the value o of a key in db dbid. Returns false and sets
  * errno to EEXIST when the key is already in a job. */
-static bool queueJob(int dbid, robj *o) {
+static bool queueJob(int dbid, robj *o, bool incoming) {
     sds name = inflightName(dbid, objectGetKey(o));
     if (!hashtableAdd(inflight_keys, name)) {
         sdsfree(name);
@@ -222,6 +234,7 @@ static bool queueJob(int dbid, robj *o) {
     job->input = sdsdup(objectGetVal(o));
     job->frame = NULL;
     job->compress_us = 0;
+    job->incoming = incoming;
     mutexQueueAdd(pending_jobs, job);
     return true;
 }
@@ -262,7 +275,7 @@ static bool checkKey(int dbid, robj *o) {
         return false;
     }
     compressor_stats.counters.compression_total_keys_eligible++;
-    if (!queueJob(dbid, o)) {
+    if (!queueJob(dbid, o, false)) {
         compressor_stats.counters.compression_total_keys_skipped_already_queued++;
         return false;
     }
@@ -429,6 +442,72 @@ static int sweepCursor(void) {
     return data.queued;
 }
 
+/* ------------------------------ Incoming keys ------------------------------ */
+
+bool compressorKeyModified(client *c, serverDb *db, robj *key) {
+    if (incoming_keys == NULL || c == NULL) return false;
+    int type = getClientType(c);
+    if (type != CLIENT_TYPE_PRIMARY && type != CLIENT_TYPE_SLOT_IMPORT) return false;
+    sds name = inflightName(db->id, objectGetVal(key));
+    if (!hashtableAdd(incoming_keys, name)) {
+        sdsfree(name);
+        return false;
+    }
+    fifoPush(incoming_order, name);
+    return true;
+}
+
+unsigned long compressorIncomingPendingKeys(void) {
+    return incoming_keys ? hashtableSize(incoming_keys) : 0;
+}
+
+/* Queues jobs for incoming keys, oldest first, until compression-sweeper-samples
+ * keys are done or compression-max-inflight-requests jobs are in flight. A
+ * key that is gone, or that can not be compressed (see canCompressValue()),
+ * is dropped from the set.
+ *
+ * A key that already has a job (from the sweeper, or for an older value)
+ * stays in the set. That job may be dropped at install, because the value
+ * changed, so the newest value needs its own job. The key goes to the end of
+ * the queue and is tried again in a later call, after the job is done. Each
+ * key is tried once per call. Returns the number of jobs queued. */
+static int queueIncomingKeys(void) {
+    unsigned int budget = (unsigned int)server.compression_sweeper_samples;
+    int queued = 0;
+    fifo *again = NULL;
+    sds name;
+    while (budget > 0 && !inflightIsFull() && fifoPop(incoming_order, (void **)&name)) {
+        budget--;
+        int dbid;
+        memcpy(&dbid, name, sizeof(dbid));
+        sds key = sdsnewlen(name + sizeof(dbid), sdslen(name) - sizeof(dbid));
+        serverDb *db = dbid < server.dbnum ? server.db[dbid] : NULL;
+        robj *o = db ? dbFind(db, key) : NULL;
+        bool keep = false;
+        if (o != NULL && canCompressValue(o)) {
+            if (queueJob(dbid, o, true)) {
+                compressor_stats.counters.compression_total_incoming_jobs_queued++;
+                queued++;
+            } else {
+                keep = (errno == EEXIST);
+            }
+        }
+        sdsfree(key);
+        if (keep) {
+            if (again == NULL) again = fifoCreate();
+            fifoPush(again, name);
+        } else {
+            /* The table owns name and frees it. */
+            hashtableDelete(incoming_keys, name);
+        }
+    }
+    if (again != NULL) {
+        while (fifoPop(again, (void **)&name)) fifoPush(incoming_order, name);
+        fifoRelease(again);
+    }
+    return queued;
+}
+
 int compressorCron(void) {
     if (pending_jobs == NULL || server.loading) return 0;
     /* Installing a frame changes memory that a child process (BGSAVE,
@@ -438,17 +517,20 @@ int compressorCron(void) {
         return 0;
     }
 
+    /* Incoming keys first. The sweeper gets the room that is left. */
+    int incoming = queueIncomingKeys();
+
     unsigned long long total = 0;
     for (int i = 0; i < server.dbnum; i++) {
         if (server.db[i] != NULL) total += kvstoreSize(server.db[i]->keys);
     }
-    if (total == 0) return 0;
+    if (total == 0) return incoming;
 
     /* Both policies look at no more than compression-sweeper-samples keys per
      * call, and stop when compression-max-inflight-requests jobs are in
      * flight. */
-    if (server.compression_sweeper_policy == COMPRESSOR_SWEEPER_POLICY_CURSOR) return sweepCursor();
-    return sweepRandom(total);
+    if (server.compression_sweeper_policy == COMPRESSOR_SWEEPER_POLICY_CURSOR) return incoming + sweepCursor();
+    return incoming + sweepRandom(total);
 }
 
 /* ------------------------ Installing results (beforeSleep) ------------------------ */
@@ -475,7 +557,7 @@ static bool installJob(compressorJob *job) {
         errno = ENOENT;
         return false;
     }
-    if (!canCompress(o)) {
+    if (job->incoming ? !canCompressValue(o) : !canCompress(o)) {
         compressor_stats.counters.compression_total_values_dropped_not_eligible++;
         return false;
     }
@@ -504,21 +586,26 @@ int compressorBeforeSleep(void) {
     /* Copies made outside a command, for example by a module timer. */
     compressorReleasePlainCopies();
 
-    if (inflightCount() == 0) return 0;
-    /* Leave the results in the queue while a child process runs. See
-     * compressorCron(). The compare at install catches any change. */
+    if (pending_jobs == NULL || server.loading) return 0;
+    /* Leave the results and the incoming keys in their queues while a child
+     * process runs. See compressorCron(). The compare at install catches any
+     * change. */
     if (hasActiveChildProcess()) return 0;
-    fifo *done = mutexQueuePopAll(done_jobs, false);
-    if (done == NULL) return 0;
 
     int installed = 0;
-    compressorJob *job;
-    while (fifoPop(done, (void **)&job)) {
-        compressor_stats.counters.compression_total_compression_time_us += job->compress_us;
-        if (installJob(job)) installed++;
-        freeJob(job);
+    fifo *done = inflightCount() ? mutexQueuePopAll(done_jobs, false) : NULL;
+    if (done != NULL) {
+        compressorJob *job;
+        while (fifoPop(done, (void **)&job)) {
+            compressor_stats.counters.compression_total_compression_time_us += job->compress_us;
+            if (installJob(job)) installed++;
+            freeJob(job);
+        }
+        fifoRelease(done);
     }
-    fifoRelease(done);
+    /* The installs made room in the in-flight limit. Incoming keys use it at
+     * once, so an import is not limited to the 10 cron calls per second. */
+    if (fifoLength(incoming_order)) queueIncomingKeys();
     return installed;
 }
 
