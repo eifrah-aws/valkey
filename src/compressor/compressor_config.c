@@ -6,6 +6,7 @@
 
 /* Checks for the inline compression settings. See compressor_config.h. */
 
+#include "fmacros.h" /* must come before any system header */
 #include "compressor/compressor_config.h"
 #include "server.h"
 

@@ -7,6 +7,7 @@
 /* Building, checking, and decoding compression frames. See compressor_frame.h
  * for the layout. */
 
+#include "fmacros.h" /* must come before any system header */
 #include "compressor/compressor_frame.h"
 #include "endianconv.h"
 #include "server.h" /* serverAssert */

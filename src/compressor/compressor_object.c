@@ -7,6 +7,7 @@
 /* Compressing and decompressing string objects on the main thread. See
  * compressor_object.h. */
 
+#include "fmacros.h" /* must come before any system header */
 #include "compressor/compressor_object.h"
 #include "compressor/compressor_frame.h"
 #include "server.h"
