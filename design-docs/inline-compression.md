@@ -22,6 +22,16 @@ We intend to add opt-in, transparent compression for Valkey values, starting wit
 
 Candidate selection and frame installation remain coordinated with the main event loop. Expensive compression and dictionary training run outside the request path. The design bounds the work in each cycle, checks that a key has not changed before replacing its value, and exposes operational data for measuring savings and cost. Implementation details may evolve, but the goal remains predictable background work without changing Valkey's data semantics.
 
+
+### 2.1 Scope: v1 and v2
+
+The work comes in two versions.
+
+- **v1** compresses cold string values with LZ4 and no dictionary. It covers the sweeper, the worker pool, the frame, the read path, persistence (§4.3), forkless save (§7.2), compression on slot-migration import and replica apply (§3.2, §3.4), the downgrade option, and the measurements in the TODO notes of this document.
+- **v2** adds improvements that v1 works without: the skip table for data that is already compressed (§6.1), the compression dictionary registry (§5), the zstd backend and dictionary training (§8), and a lower read cost: decompress in the I/O threads, or keep the frame on a read of a cold key (§4.2).
+
+The v1 measurements decide if dictionaries and zstd are worth the work.
+
 ---
 
 ## 3. Data entering Valkey
@@ -94,7 +104,7 @@ A key with a TTL is sent as `SET` and then `PEXPIREAT`. On the target, the `PEXP
 
 Reads return uncompressed logical values. An uncompressed value follows the existing path. On the first read of a compressed value, Valkey synchronously decompresses it and replaces the stored frame with the RAW value. It also adds the key to the internal hot-key LRU described in §7.3. Later reads use the RAW value directly. Every read refreshes the key's hot-key entry, and the background sweeper excludes keys that remain in that LRU. This approach pays the decompression cost once when a cold key becomes active, rather than on every read.
 
-This tradeoff is deliberate: the first read gives back that key's memory saving. The value becomes eligible for compression again only after its hot-key entry expires or is evicted and the normal coldness gate in §6.1 passes.
+This tradeoff is deliberate: the first read gives back that key's memory saving. A lower read cost, with decompression in the I/O threads or with the frame kept on a read of a cold key, is part of v2 (§2.1). The value becomes eligible for compression again only after its hot-key entry expires or is evicted and the normal coldness gate in §6.1 passes.
 
 > **TODO — back decompress-on-read with numbers:** measure p50, p99, and p99.9 first-read latency, steady-state hot-read latency, throughput, event-loop stall time, memory returned by decompress-on-read, and recompression attempts across value sizes and multi-value commands.
 
@@ -128,6 +138,8 @@ A multipart AOF may therefore contain a representation-preserving RDB base follo
 ---
 
 ## 5. The compression dictionary, and why we hold more than one
+
+Dictionaries are part of v2 (§2.1). In v1, every frame has `dict_id` 0.
 
 Normal compression finds repeated data **inside one value**. A 500-byte JSON value may contain few repeats, so it often compresses poorly on its own.
 
@@ -188,7 +200,7 @@ After the coldness test, the sweeper takes a value only if a compression backend
 
 Dictionary-capable modes use the active dictionary when one is available. A backend may also create a frame without a dictionary—for example, an LZ4 configuration that does not use one—in which case `dict_id` is zero. The frame still records the algorithm and format needed to decode it (§6.4).
 
-**Skip data that is already compressed.** Before the snapshot copy, the sweeper compares the first bytes of the value against a small table. A match means the bytes are already compressed, so an attempt would spend a main-thread `memcpy` (§6.2), a worst-case-size allocation, and worker CPU to learn nothing.
+**Skip data that is already compressed** (v2, §2.1). Before the snapshot copy, the sweeper compares the first bytes of the value against a small table. A match means the bytes are already compressed, so an attempt would spend a main-thread `memcpy` (§6.2), a worst-case-size allocation, and worker CPU to learn nothing.
 
 | Format | First bytes |
 |---|---|
@@ -420,7 +432,7 @@ A failure returns 0, and the code goes into `instance->last_error`. `compressorS
 
 The backend used for **new compression** is selected at startup from `compression-mode` (§9). Persisted frames may outlive the process that created them, so each frame records its algorithm and format version, and each loaded dictionary is associated with that algorithm (§6.4). The process must retain decoder contexts for every algorithm present in the loaded RDB even when new compression is disabled or configured to use another backend.
 
-The second backend (LZ4) is operator-selectable at startup, because `compression-mode` names the algorithm. `zstd` is the recommended value (the default of `compression-mode` is `off`): dictionary support is what makes small values compress well, and LZ4's dictionary support is weaker. The honest summary for the config docs is that `lz4` trades ratio for speed, and the gap is widest exactly where this feature aims — values of a few hundred bytes. Note that LZ4 is already vendored in `deps/lz4`. zstd is not vendored, but Valkey can already link it as an optional system library (`BUILD_ZSTD`, default `no`), used by `src/compression_zstd.c`. The zstd backend should use that. Open question: the default mode `zstd` would then need `BUILD_ZSTD=yes`.
+v1 has only the LZ4 backend; zstd and dictionary training are part of v2 (§2.1). The second backend (LZ4) is operator-selectable at startup, because `compression-mode` names the algorithm. `zstd` is the recommended value (the default of `compression-mode` is `off`): dictionary support is what makes small values compress well, and LZ4's dictionary support is weaker. The honest summary for the config docs is that `lz4` trades ratio for speed, and the gap is widest exactly where this feature aims — values of a few hundred bytes. Note that LZ4 is already vendored in `deps/lz4`. zstd is not vendored, but Valkey can already link it as an optional system library (`BUILD_ZSTD`, default `no`), used by `src/compression_zstd.c`. The zstd backend should use that. Open question: the default mode `zstd` would then need `BUILD_ZSTD=yes`.
 
 ---
 

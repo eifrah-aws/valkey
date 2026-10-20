@@ -20,6 +20,11 @@ One line per task. `[DONE]` tasks are pushed to `origin/valkey-inline-compressio
 (the `eifrah-aws/valkey` fork). `[WIP]` means work has started and is not
 done. `[NOT STARTED]` means no work has started.
 
+The open tasks belong to one of two versions (`OVERVIEW.md`, "Still to do"
+and "Phase 2"; design doc section 2.1). `(v1)`: needed for the first
+version. `(v2)`: improvements for the second version. "Phase 2" in
+`OVERVIEW.md` is v2, not the plan's Phase 2 below (configuration settings).
+
 1. [DONE] Phase 0 - Compressor interface and LZ4 backend (`89e80d243`).
 2. [DONE] Phase 1 - Compression frame, 10-byte header (`e37891511`).
 3. [DONE] Phase 2 - Configuration settings (`cc4fbb5fa`).
@@ -33,16 +38,16 @@ done. `[NOT STARTED]` means no work has started.
 11. [DONE] Phase 5 - Cursor sweeper policy (`compression-sweeper-policy`), `COMPRESSOR_SAMPLES_PER_CRON` 500 (`21033ad76`).
 12. [DONE] Phase 5 - Sweeper backoff, `cursor` only: pause after a pass with less than 1% eligible keys (`compression-sweeper-backoff-seconds`).
 13. [DONE] Phase 5 - Benchmark `cursor` and `random`, then choose the defaults. Done: `compression-sweeper-samples` is now a setting (was `COMPRESSOR_SAMPLES_PER_CRON`), the benchmark script and checker (`bench/compression-bench.sh`, `bench/analyze.py`), and two runs on 2026-10-18 (`bench/RESULTS-2026-10-18.md`, 15 scenarios, and `bench/RESULTS-2026-10-18-defrag.md`, 3 scenarios with active defrag). Defaults chosen: `cursor`, 500 samples, and `compression-max-inflight-requests` 1000 (was 100). Repeat runs for the noise go to Phase 8.
-14. [NOT STARTED] Phase 5 - Magic-byte skip table for data that is already compressed.
-15. [NOT STARTED] Phase 5 - Check `CLIENT PAUSE WRITE` and replicas, and the missing sweeper tests.
-16. [WIP] Phase 6 - RDB and AOF persistence: a new RDB type that saves frames as they are. Done: RDB 82 with `RDB_TYPE_STRING_COMPRESSED`, save and load, tests (`f36b501ac`). Left: the dictionary section (with Phase 10), a "save as plain" switch for downgrade, a fixed RDB fixture.
+14. [NOT STARTED] (v2) Phase 5 - Magic-byte skip table for data that is already compressed.
+15. [NOT STARTED] (v1) Phase 5 - Check `CLIENT PAUSE WRITE` and replicas, and the missing sweeper tests.
+16. [WIP] (v1) Phase 6 - RDB and AOF persistence: a new RDB type that saves frames as they are. Done: RDB 82 with `RDB_TYPE_STRING_COMPRESSED`, save and load, tests (`f36b501ac`). Left: the dictionary section (with Phase 10), a "save as plain" switch for downgrade, a fixed RDB fixture.
 17. [DONE] Phase 7 - Compress on import and on replica apply (no memory spike), through a queue of incoming keys.
-18. [NOT STARTED] Phase 8 - Measurements.
-19. [NOT STARTED] Phase 9 - Documentation.
-20. [NOT STARTED] Phase 10 - Dictionary registry.
-21. [NOT STARTED] Phase 11 - zstd backend and training.
+18. [NOT STARTED] (v1) Phase 8 - Measurements.
+19. [NOT STARTED] (v1) Phase 9 - Documentation.
+20. [NOT STARTED] (v2) Phase 10 - Dictionary registry.
+21. [NOT STARTED] (v2) Phase 11 - zstd backend and training.
 22. [DONE] Separate task - Forkless save support (see the section below).
-23. [NOT STARTED] Idea - Decompress in the I/O thread (off-loading).
+23. [NOT STARTED] (v2) Idea - Lower read cost: decompress in the I/O thread (off-loading), or keep the frame on a read of a cold key.
 24. [NOT STARTED] Idea - Run the whole test suite with compression on (design doc section 10.1).
 
 ## Phase 0 - Compressor interface and LZ4 backend (DONE, pushed)

@@ -36,12 +36,17 @@ In order.
 
 1. Check the sweeper with `CLIENT PAUSE WRITE` and on replicas, and add the missing sweeper tests.
 2. Add a "save as plain" option, so that an older Valkey version can load the RDB (downgrade).
-3. Skip values that are already compressed (PNG, JPEG, gzip, ...) by their first bytes.
-4. Run the full measurements of the design TODOs.
-5. Add the compression dictionary registry, for better ratios on small values.
-6. Add the zstd backend and dictionary training.
-7. Write the user documentation (`valkey.conf`, INFO fields), and recommend `activedefrag yes` with compression, so RSS follows `used_memory`.
-8. Design a lower read cost: decompress in the I/O threads, or keep the frame on a read of a cold key.
+3. Run the full measurements of the design TODOs.
+4. Write the user documentation (`valkey.conf`, INFO fields), and recommend `activedefrag yes` with compression, so RSS follows `used_memory`.
+
+## Phase 2
+
+In order.
+
+1. Skip values that are already compressed (PNG, JPEG, gzip, ...) by their first bytes.
+2. Add the compression dictionary registry, for better ratios on small values.
+3. Add the zstd backend and dictionary training.
+4. Design a lower read cost: decompress in the I/O threads, or keep the frame on a read of a cold key.
 
 <div style="page-break-after: always;"></div>
 
