@@ -50,6 +50,41 @@ version. `(v2)`: improvements for the second version. "Phase 2" in
 23. [NOT STARTED] (v2) Idea - Lower read cost: decompress in the I/O thread (off-loading), or keep the frame on a read of a cold key.
 24. [NOT STARTED] Idea - Run the whole test suite with compression on (design doc section 10.1).
 25. [NOT STARTED] Split the work into small upstream PRs (see "Upstream PRs" below).
+26. [NOT STARTED] (v1) Align the code with the new design doc (`2f1b54f7c`), after PR 1 is accepted (see "Align the code with the new design doc" below).
+
+## Align the code with the new design doc (TODO, after PR 1)
+
+The design doc was rewritten on the PR 1 branch (`237f80b7e`) and copied to
+the main branch (`2f1b54f7c`). The code does not match it yet in these
+places. Do this after PR 1 is accepted; plan each item and get a yes first.
+
+1. **Read policy.** New setting `compression-read-policy` with `copy` (a read
+   uses a temporary copy, the stored value stays compressed) and `hot` (a
+   read decompresses only a hot key: LRU, a time window; LFU, the threshold
+   plus a margin). Today every normal read decompresses in place.
+2. **Slot-import backpressure.** The compression job of an eligible
+   slot-import write must be admitted before more commands are read from
+   that connection. When the job-count or byte limit is full, pause the
+   connection. Needs a new byte limit and an INFO field. Today the key names
+   are queued and the import never waits.
+3. **Replica apply is plain.** Incremental replication installs plain values
+   with no priority job; the sweeper compresses them later. Today writes
+   from the primary are queued at once (Phase 7): remove
+   `CLIENT_TYPE_PRIMARY` from `compressionKeyModified()` and its tests.
+4. **`DUMP` and the old `MIGRATE` send plain RDB strings.** Today `DUMP`
+   writes `RDB_TYPE_STRING_COMPRESSED`. `RESTORE` still accepts both.
+5. **Full sync check.** If the transport can not make an RDB that the
+   replica can read (for example disk-based sync, which forces
+   `RDB_VERSION`, to a replica that knows only an older version), refuse the
+   sync before the snapshot. Today there is no check.
+6. **Frame fields.** The doc lists the length, the algorithm id, the format
+   version and the body. The 10-byte header also has `dict_id` and
+   `original_encoding`. Decide: change the frame (and RDB 82), or adjust the
+   doc.
+7. **INFO.** The doc asks for the memory of queued, running and done jobs,
+   slot-import backpressure, and in-place decompressions. Today there are
+   job counts only, and in-place decompressions are
+   `compression_total_values_decompressed`.
 
 ## Upstream PRs (TODO)
 

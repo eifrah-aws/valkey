@@ -39,6 +39,7 @@ In order.
 3. Run the full measurements of the design TODOs.
 4. Write the user documentation (`valkey.conf`, INFO fields), and recommend `activedefrag yes` with compression, so RSS follows `used_memory`.
 5. Send the work upstream as a stack of 9 small PRs, each with its own tests and compression off by default (`plan.md`, "Upstream PRs").
+6. Align the code with the new design doc after PR 1 is accepted: read policy, slot-import backpressure, plain values on replica apply and in `DUMP`, full-sync check, frame fields, INFO fields (`plan.md`).
 
 ## Phase 2
 
