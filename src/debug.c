@@ -28,7 +28,7 @@
  */
 
 #include "server.h"
-#include "compressor/compressor_workers.h"
+#include "compression_workers.h"
 #include "ordered_index.h"
 #include "util.h"
 #include "sha1.h" /* SHA1 is used for DEBUG DIGEST */
@@ -759,7 +759,7 @@ void debugCommand(client *c) {
         addReplyStatusLength(c, s, sdslen(s));
         sdsfree(s);
     } else if (!strcasecmp(objectGetVal(c->argv[1]), "compress-key") && c->argc == 3) {
-        compressorDebugCompressKey(c);
+        compressionDebugCompressKey(c);
     } else if (!strcasecmp(objectGetVal(c->argv[1]), "sdslen") && c->argc == 3) {
         robj *val;
         sds key;
@@ -2331,7 +2331,7 @@ static void killMainThread(void) {
 void killThreads(void) {
     killMainThread();
     bioKillThreads();
-    compressorWorkersKill();
+    compressionWorkersKill();
     killIOThreads();
 }
 

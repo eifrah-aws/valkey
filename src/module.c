@@ -56,7 +56,7 @@
  * function names. For details, see the script src/modules/gendoc.rb.
  * -------------------------------------------------------------------------- */
 #include "server.h"
-#include "compressor/compressor_object.h"
+#include "compression_object.h"
 #include "ordered_index.h"
 #include "cluster.h"
 #include "entry.h"
@@ -4341,11 +4341,11 @@ static void moduleInitKey(ValkeyModuleKey *kp, ValkeyModuleCtx *ctx, robj *keyna
      * read handle gets its own plain copy and the stored value stays
      * compressed: a module that scans the keyspace must not decompress all of
      * it. */
-    if (value && unlikely(value->encoding == OBJ_ENCODING_COMPRESSED) && compressorIsCompressedString(value)) {
+    if (value && unlikely(value->encoding == OBJ_ENCODING_COMPRESSED) && compressionIsCompressedString(value)) {
         if (mode & VALKEYMODULE_WRITE) {
-            compressorDecompressStringObject(value);
+            compressionDecompressStringObject(value);
         } else {
-            value = compressorCreatePlainCopy(value);
+            value = compressionCreatePlainCopy(value);
             kp->owns_value = 1;
         }
     }

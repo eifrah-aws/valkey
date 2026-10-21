@@ -40,8 +40,8 @@
 #include "eval.h"
 #include "lrulfu.h"
 #include "throttle_repl.h"
-#include "compressor/compressor_config.h"
-#include "compressor/compressor_workers.h"
+#include "compression_config.h"
+#include "compression_workers.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -197,12 +197,12 @@ configEnum cluster_replica_no_failover_enum[] = {{"no", CLUSTER_REPLICA_NO_FAILO
                                                  {NULL, 0}};
 
 /* Only the backends that exist. zstd is added with its backend. */
-configEnum compression_mode_enum[] = {{"off", COMPRESSOR_ALG_NONE},
-                                      {"lz4", COMPRESSOR_ALG_LZ4},
+configEnum compression_mode_enum[] = {{"off", ALGO_NONE},
+                                      {"lz4", ALGO_LZ4},
                                       {NULL, 0}};
 
-configEnum compression_sweeper_policy_enum[] = {{"random", COMPRESSOR_SWEEPER_POLICY_RANDOM},
-                                                {"cursor", COMPRESSOR_SWEEPER_POLICY_CURSOR},
+configEnum compression_sweeper_policy_enum[] = {{"random", COMPRESSION_SWEEPER_POLICY_RANDOM},
+                                                {"cursor", COMPRESSION_SWEEPER_POLICY_CURSOR},
                                                 {NULL, 0}};
 
 configEnum repl_compression_enum[] = {{"no", REPL_COMPRESSION_NO},
@@ -682,7 +682,7 @@ void loadServerConfigFromString(sds config) {
         err = "replicaof directive not allowed in cluster mode";
         goto loaderr;
     }
-    if (!compressorConfigCheck(&err)) goto loaderr;
+    if (!compressionConfigCheck(&err)) goto loaderr;
     if (server.bgsave_default_method == RDB_BGSAVE_TYPE_FORKLESS && !server.forkless_infrastructure_enabled) {
         err = "'bgsave-default-method forkless' can only be selected when the server was started with "
               "'forkless-infrastructure-enabled yes'";
@@ -3570,16 +3570,16 @@ standardConfig static_configs[] = {
     createEnumConfig("rdbcompression", NULL, MODIFIABLE_CONFIG, rdb_compression_enum, server.rdb_compression, RDB_COMPRESSION_YES, isValidRdbCompression, NULL),
     createEnumConfig("cluster-replica-no-failover", "cluster-slave-no-failover", MODIFIABLE_CONFIG, cluster_replica_no_failover_enum, server.cluster_replica_no_failover, CLUSTER_REPLICA_NO_FAILOVER_NO, NULL, updateClusterFlags), /* Failover by default. */
     createEnumConfig("repl-compression", NULL, MODIFIABLE_CONFIG, repl_compression_enum, server.repl_compression, REPL_COMPRESSION_NO, isValidReplCompression, NULL),
-    createEnumConfig("compression-mode", NULL, IMMUTABLE_CONFIG, compression_mode_enum, server.compression_mode, COMPRESSOR_ALG_NONE, NULL, NULL),
-    createIntConfig("compression-threads", NULL, IMMUTABLE_CONFIG, COMPRESSOR_THREADS_MIN, COMPRESSOR_THREADS_MAX, server.compression_threads, COMPRESSOR_THREADS_DEFAULT, INTEGER_CONFIG, NULL, NULL),
-    createIntConfig("compression-max-inflight-requests", NULL, MODIFIABLE_CONFIG, COMPRESSOR_MAX_INFLIGHT_REQUESTS_MIN, COMPRESSOR_MAX_INFLIGHT_REQUESTS_MAX, server.compression_max_inflight_requests, COMPRESSOR_MAX_INFLIGHT_REQUESTS_DEFAULT, INTEGER_CONFIG, NULL, NULL),
-    createIntConfig("compression-lfu-threshold", NULL, MODIFIABLE_CONFIG, COMPRESSOR_LFU_THRESHOLD_MIN, COMPRESSOR_LFU_THRESHOLD_MAX, server.compression_lfu_threshold, COMPRESSOR_LFU_THRESHOLD_DEFAULT, INTEGER_CONFIG, NULL, NULL),
-    createEnumConfig("compression-sweeper-policy", NULL, MODIFIABLE_CONFIG, compression_sweeper_policy_enum, server.compression_sweeper_policy, COMPRESSOR_SWEEPER_POLICY_DEFAULT, NULL, NULL),
-    createIntConfig("compression-sweeper-samples", NULL, MODIFIABLE_CONFIG, COMPRESSOR_SWEEPER_SAMPLES_MIN, COMPRESSOR_SWEEPER_SAMPLES_MAX, server.compression_sweeper_samples, COMPRESSOR_SWEEPER_SAMPLES_DEFAULT, INTEGER_CONFIG, NULL, NULL),
-    createIntConfig("compression-sweeper-backoff-seconds", NULL, MODIFIABLE_CONFIG, COMPRESSOR_SWEEPER_BACKOFF_SECONDS_MIN, COMPRESSOR_SWEEPER_BACKOFF_SECONDS_MAX, server.compression_sweeper_backoff_seconds, COMPRESSOR_SWEEPER_BACKOFF_SECONDS_DEFAULT, INTEGER_CONFIG, NULL, compressorSweeperBackoffApply),
-    createSizeTConfig("compression-min-value-size", NULL, MODIFIABLE_CONFIG, 1, COMPRESSOR_VALUE_SIZE_MAX, server.compression_min_value_size, COMPRESSOR_MIN_VALUE_SIZE_DEFAULT, MEMORY_CONFIG, NULL, compressorConfigCheck),
-    createSizeTConfig("compression-max-value-size", NULL, MODIFIABLE_CONFIG, 1, COMPRESSOR_VALUE_SIZE_MAX, server.compression_max_value_size, COMPRESSOR_MAX_VALUE_SIZE_DEFAULT, MEMORY_CONFIG, NULL, compressorConfigCheck),
-    createSizeTConfig("compression-dict-size", NULL, IMMUTABLE_CONFIG, COMPRESSOR_DICT_SIZE_MIN, COMPRESSOR_DICT_SIZE_MAX, server.compression_dict_size, COMPRESSOR_DICT_SIZE_DEFAULT, MEMORY_CONFIG, NULL, NULL),
+    createEnumConfig("compression-mode", NULL, IMMUTABLE_CONFIG, compression_mode_enum, server.compression_mode, ALGO_NONE, NULL, NULL),
+    createIntConfig("compression-threads", NULL, IMMUTABLE_CONFIG, COMPRESSION_THREADS_MIN, COMPRESSION_THREADS_MAX, server.compression_threads, COMPRESSION_THREADS_DEFAULT, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("compression-max-inflight-requests", NULL, MODIFIABLE_CONFIG, COMPRESSION_MAX_INFLIGHT_REQUESTS_MIN, COMPRESSION_MAX_INFLIGHT_REQUESTS_MAX, server.compression_max_inflight_requests, COMPRESSION_MAX_INFLIGHT_REQUESTS_DEFAULT, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("compression-lfu-threshold", NULL, MODIFIABLE_CONFIG, COMPRESSION_LFU_THRESHOLD_MIN, COMPRESSION_LFU_THRESHOLD_MAX, server.compression_lfu_threshold, COMPRESSION_LFU_THRESHOLD_DEFAULT, INTEGER_CONFIG, NULL, NULL),
+    createEnumConfig("compression-sweeper-policy", NULL, MODIFIABLE_CONFIG, compression_sweeper_policy_enum, server.compression_sweeper_policy, COMPRESSION_SWEEPER_POLICY_DEFAULT, NULL, NULL),
+    createIntConfig("compression-sweeper-samples", NULL, MODIFIABLE_CONFIG, COMPRESSION_SWEEPER_SAMPLES_MIN, COMPRESSION_SWEEPER_SAMPLES_MAX, server.compression_sweeper_samples, COMPRESSION_SWEEPER_SAMPLES_DEFAULT, INTEGER_CONFIG, NULL, NULL),
+    createIntConfig("compression-sweeper-backoff-seconds", NULL, MODIFIABLE_CONFIG, COMPRESSION_SWEEPER_BACKOFF_SECONDS_MIN, COMPRESSION_SWEEPER_BACKOFF_SECONDS_MAX, server.compression_sweeper_backoff_seconds, COMPRESSION_SWEEPER_BACKOFF_SECONDS_DEFAULT, INTEGER_CONFIG, NULL, compressionSweeperBackoffApply),
+    createSizeTConfig("compression-min-value-size", NULL, MODIFIABLE_CONFIG, 1, COMPRESSION_VALUE_SIZE_MAX, server.compression_min_value_size, COMPRESSION_MIN_VALUE_SIZE_DEFAULT, MEMORY_CONFIG, NULL, compressionConfigCheck),
+    createSizeTConfig("compression-max-value-size", NULL, MODIFIABLE_CONFIG, 1, COMPRESSION_VALUE_SIZE_MAX, server.compression_max_value_size, COMPRESSION_MAX_VALUE_SIZE_DEFAULT, MEMORY_CONFIG, NULL, compressionConfigCheck),
+    createSizeTConfig("compression-dict-size", NULL, IMMUTABLE_CONFIG, COMPRESSION_DICT_SIZE_MIN, COMPRESSION_DICT_SIZE_MAX, server.compression_dict_size, COMPRESSION_DICT_SIZE_DEFAULT, MEMORY_CONFIG, NULL, NULL),
 
     /* Integer configs */
     createIntConfig("databases", NULL, IMMUTABLE_CONFIG, 1, INT_MAX, server.config_databases, 16, INTEGER_CONFIG, NULL, NULL),

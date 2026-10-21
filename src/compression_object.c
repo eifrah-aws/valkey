@@ -5,31 +5,31 @@
  */
 
 /* Compressing and decompressing string objects on the main thread. See
- * compressor_object.h. */
+ * compression_object.h. */
 
 #include "fmacros.h" /* must come before any system header */
-#include "compressor/compressor_object.h"
-#include "compressor/compressor_frame.h"
+#include "compression_object.h"
+#include "compression_value.h"
 #include "server.h"
 #include "rdb.h"
 #include "adlist.h"
 #include "bgiteration.h"
 #include "monotonic.h"
-#include "compressor/compressor_stats.h"
+#include "compression_stats.h"
 
 #include <errno.h>
 
 /* One compressor for each algorithm, used only by the main thread to
  * decompress. NULL until first use. */
-static compressorAlg *main_thread_compressors[COMPRESSOR_ALG_COUNT];
+static blockCompressor *main_thread_compressors[ALGO_ZSTD + 1];
 
-compressorAlg *compressorGetForMainThread(uint8_t algorithm_id) {
-    if (algorithm_id == COMPRESSOR_ALG_NONE || algorithm_id >= COMPRESSOR_ALG_COUNT) {
+blockCompressor *compressionGetForMainThread(uint8_t algorithm_id) {
+    if (algorithm_id != ALGO_LZ4 && algorithm_id != ALGO_ZSTD) {
         errno = EINVAL;
         return NULL;
     }
     if (main_thread_compressors[algorithm_id] == NULL) {
-        main_thread_compressors[algorithm_id] = newCompressor(algorithm_id, NULL);
+        main_thread_compressors[algorithm_id] = blockCompressorCreate(algorithm_id, NULL);
         if (main_thread_compressors[algorithm_id] == NULL) {
             errno = ENOTSUP;
             return NULL;
@@ -39,35 +39,35 @@ compressorAlg *compressorGetForMainThread(uint8_t algorithm_id) {
 }
 
 /* Plain copies made for reads while a child process runs. Released by
- * compressorAfterCall() or compressorReleasePlainCopies(). */
+ * compressionAfterCall() or compressionReleasePlainCopies(). */
 static list *plain_copies;
-unsigned long compressor_plain_copies;
+unsigned long compression_plain_copies;
 
-bool compressorIsCompressedString(const robj *o) {
+bool compressionIsCompressedString(const robj *o) {
     return objectGetType(o) == OBJ_STRING && objectGetEncoding(o) == OBJ_ENCODING_COMPRESSED;
 }
 
-void compressorSetCompressedValue(robj *o, sds frame) {
+void compressionSetCompressedValue(robj *o, sds frame) {
     serverAssert(objectGetType(o) == OBJ_STRING && objectGetEncoding(o) == OBJ_ENCODING_RAW);
     sds plain = objectGetVal(o);
-    compressorStatsAddValue(sdslen(plain), compressorFrameAllocSize(frame));
+    compressionStatsAddValue(sdslen(plain), compressionValueAllocSize(frame));
     objectSetVal(o, frame);
     objectSetEncoding(o, OBJ_ENCODING_COMPRESSED);
     sdsfree(plain);
 }
 
-sds compressorDupFrame(const robj *o) {
-    serverAssert(compressorIsCompressedString(o));
+sds compressionDupFrame(const robj *o) {
+    serverAssert(compressionIsCompressedString(o));
     sds frame = sdsdup(objectGetVal(o));
-    compressorStatsAddValue(compressorStringObjectLen(o), compressorFrameAllocSize(frame));
+    compressionStatsAddValue(compressionStringObjectLen(o), compressionValueAllocSize(frame));
     return frame;
 }
 
-robj *compressorCreateStringObjectFromFrame(sds frame, const char **reason) {
-    compressorFrameHeader hdr;
-    int err = compressorFrameParse(frame, &hdr);
-    if (err != COMPRESSOR_ERR_NONE) {
-        *reason = compressorStrerror(err);
+robj *compressionCreateStringObjectFromFrame(sds frame, const char **reason) {
+    compressionValueHeader hdr;
+    int err = compressionValueParse(frame, &hdr);
+    if (err != BLOCK_COMPRESSOR_ERR_NONE) {
+        *reason = blockCompressorStrerror(err);
         return NULL;
     }
     if (hdr.original_encoding != OBJ_ENCODING_RAW) {
@@ -79,28 +79,28 @@ robj *compressorCreateStringObjectFromFrame(sds frame, const char **reason) {
         *reason = "the frame needs a dictionary";
         return NULL;
     }
-    compressorAlg *c = compressorGetForMainThread(hdr.algorithm_id);
+    blockCompressor *c = compressionGetForMainThread(hdr.algorithm_id);
     if (c == NULL) {
         *reason = "this build has no backend for the algorithm of the frame";
         return NULL;
     }
     /* A read stops the server on a frame that does not decompress, so check
-     * the body now. compressorFrameDecompress() also checks the length. */
-    sds plain = compressorFrameDecompress(c, frame, NULL);
+     * the body now. compressionValueDecompress() also checks the length. */
+    sds plain = compressionValueDecompress(c, frame, NULL);
     if (plain == NULL) {
-        *reason = compressorStrerror(c->last_error);
+        *reason = blockCompressorStrerror(c->last_error);
         return NULL;
     }
     sdsfree(plain);
 
     robj *o = createObject(OBJ_STRING, frame);
     objectSetEncoding(o, OBJ_ENCODING_COMPRESSED);
-    compressorStatsAddValue(hdr.uncompressed_len, compressorFrameAllocSize(frame));
+    compressionStatsAddValue(hdr.uncompressed_len, compressionValueAllocSize(frame));
     return o;
 }
 
-ssize_t compressorRdbSaveCompressedString(rio *rdb, robj *o) {
-    serverAssert(compressorIsCompressedString(o));
+ssize_t compressionRdbSaveCompressedString(rio *rdb, robj *o) {
+    serverAssert(compressionIsCompressedString(o));
     sds frame = objectGetVal(o);
     ssize_t n, nwritten = 0;
     if ((n = rdbSaveLen(rdb, sdslen(frame))) == -1) return -1;
@@ -110,11 +110,11 @@ ssize_t compressorRdbSaveCompressedString(rio *rdb, robj *o) {
     return nwritten;
 }
 
-robj *compressorRdbLoadCompressedString(rio *rdb) {
+robj *compressionRdbLoadCompressedString(rio *rdb) {
     sds frame = rdbGenericLoadStringObject(rdb, RDB_LOAD_SDS, NULL);
     if (frame == NULL) return NULL;
     const char *reason;
-    robj *o = compressorCreateStringObjectFromFrame(frame, &reason);
+    robj *o = compressionCreateStringObjectFromFrame(frame, &reason);
     if (o == NULL) {
         rdbReportError(1, __LINE__, "Bad compressed string: %s", reason);
         sdsfree(frame);
@@ -124,65 +124,65 @@ robj *compressorRdbLoadCompressedString(rio *rdb) {
 
 /* Reads the frame header of the compressed string o. Stops the server if the
  * header is bad. */
-static void stringObjectHeader(const robj *o, compressorFrameHeader *hdr) {
+static void stringObjectHeader(const robj *o, compressionValueHeader *hdr) {
     serverAssert(objectGetType(o) == OBJ_STRING && objectGetEncoding(o) == OBJ_ENCODING_COMPRESSED);
-    int err = compressorFrameParse(objectGetVal(o), hdr);
-    if (err != COMPRESSOR_ERR_NONE) serverPanic("Bad compressed value: %s", compressorStrerror(err));
+    int err = compressionValueParse(objectGetVal(o), hdr);
+    if (err != BLOCK_COMPRESSOR_ERR_NONE) serverPanic("Bad compressed value: %s", blockCompressorStrerror(err));
 }
 
 /* A frame built with a dictionary must drop its user count of the
  * dictionary, and call the backend's release() hook. Dictionaries come in
  * Phase 10. Until then every frame has dict_id 0, so there is nothing to do.
  * Phase 10 can not call release() from here as it is: a free can run on a
- * background thread (FLUSHALL ASYNC), and each compressorAlg instance belongs
+ * background thread (FLUSHALL ASYNC), and each blockCompressor instance belongs
  * to one thread. */
-static void releaseFrameDictionary(const compressorFrameHeader *hdr) {
+static void releaseFrameDictionary(const compressionValueHeader *hdr) {
     serverAssert(hdr->dict_id == 0);
 }
 
-void compressorStringObjectFreed(const robj *o) {
-    compressorFrameHeader hdr;
+void compressionStringObjectFreed(const robj *o) {
+    compressionValueHeader hdr;
     stringObjectHeader(o, &hdr);
-    compressorStatsRemoveValue(hdr.uncompressed_len, compressorFrameAllocSize(objectGetVal(o)));
+    compressionStatsRemoveValue(hdr.uncompressed_len, compressionValueAllocSize(objectGetVal(o)));
     releaseFrameDictionary(&hdr);
 }
 
-size_t compressorStringObjectLen(const robj *o) {
-    compressorFrameHeader hdr;
+size_t compressionStringObjectLen(const robj *o) {
+    compressionValueHeader hdr;
     stringObjectHeader(o, &hdr);
     return hdr.uncompressed_len;
 }
 
-sds compressorDecompressToSds(const robj *o) {
+sds compressionDecompressToSds(const robj *o) {
     monotime start = getMonotonicUs();
     const_sds frame = objectGetVal(o);
-    compressorFrameHeader hdr;
+    compressionValueHeader hdr;
     stringObjectHeader(o, &hdr);
     serverAssert(hdr.original_encoding == OBJ_ENCODING_RAW);
     /* Dictionaries come in a later phase, so no frame can need one yet. */
     if (hdr.dict_id != 0) serverPanic("Compressed value needs dictionary %u, which is not loaded", hdr.dict_id);
 
-    compressorAlg *c = compressorGetForMainThread(hdr.algorithm_id);
+    blockCompressor *c = compressionGetForMainThread(hdr.algorithm_id);
     if (c == NULL) serverPanic("Compressed value needs algorithm %u, which this build does not have", hdr.algorithm_id);
 
-    sds plain = compressorFrameDecompress(c, frame, NULL);
-    compressor_stats.counters.compression_total_decompression_time_us += getMonotonicUs() - start;
-    if (plain == NULL) serverPanic("Can't decompress value: %s", compressorStrerror(c->last_error));
+    sds plain = compressionValueDecompress(c, frame, NULL);
+    compression_stats.counters.compression_total_decompression_time_us += getMonotonicUs() - start;
+    if (plain == NULL) serverPanic("Can't decompress value: %s", blockCompressorStrerror(c->last_error));
     return plain;
 }
 
-void compressorDecompressStringObject(robj *o) {
-    sds plain = compressorDecompressToSds(o);
+void compressionDecompressStringObject(robj *o) {
+    sds plain = compressionDecompressToSds(o);
     sds frame = objectGetVal(o);
-    compressorStatsRemoveValue(sdslen(plain), compressorFrameAllocSize(frame));
-    compressor_stats.counters.compression_total_values_decompressed++;
+    compressionStatsRemoveValue(sdslen(plain), compressionValueAllocSize(frame));
+    compression_stats.counters.compression_total_values_decompressed++;
     objectSetVal(o, plain);
     objectSetEncoding(o, OBJ_ENCODING_RAW);
     sdsfree(frame);
 }
 
-robj *compressorCreatePlainClone(robj *o) {
-    sds plain = compressorDecompressToSds(o);
+robj *compressionCreatePlainClone(robj *o) {
+    sds plain = compressionDecompressToSds(o);
     robj *clone = createStringObjectWithKeyAndExpire(plain, sdslen(plain), objectGetKey(o), objectGetExpire(o));
     sdsfree(plain);
     return clone;
@@ -204,23 +204,23 @@ robj *compressorCreatePlainClone(robj *o) {
  * The copy is new memory, not a shared page. It lives until the command ends.
  * If the reply holds the copy (large values are sent by reference), the reply
  * keeps its own reference, and the copy is freed when the reply is sent. */
-robj *compressorCreatePlainCopy(robj *val) {
-    robj *copy = createObject(OBJ_STRING, compressorDecompressToSds(val));
+robj *compressionCreatePlainCopy(robj *val) {
+    robj *copy = createObject(OBJ_STRING, compressionDecompressToSds(val));
     copy = objectSetKeyAndExpire(copy, objectGetKey(val), objectGetExpire(val));
     objectSetLRU(copy, objectGetLRU(val));
-    compressor_stats.counters.compression_total_temporary_copies_made++;
+    compression_stats.counters.compression_total_temporary_copies_made++;
     return copy;
 }
 
-robj *compressorLookupValue(robj *val, int flags) {
-    if (!compressorIsCompressedString(val) || (flags & LOOKUP_NODECOMPRESS)) return val;
+robj *compressionLookupValue(robj *val, int flags) {
+    if (!compressionIsCompressedString(val) || (flags & LOOKUP_NODECOMPRESS)) return val;
 
     if (flags & LOOKUP_WRITE) {
         /* The forkless save thread may be reading the frame. Write commands
          * wait for it, so only VM_OpenKey() gets here, and it refuses the
          * key after the lookup. */
         if (bgIteration_isEntryInuse(val)) return val;
-        compressorDecompressStringObject(val);
+        compressionDecompressStringObject(val);
         return val;
     }
     /* A decompress in place frees the frame. Someone else that holds val
@@ -228,42 +228,42 @@ robj *compressorLookupValue(robj *val, int flags) {
      * it. A child process shares all memory pages, so then every read gets a
      * copy. */
     if (!hasActiveChildProcess() && objectGetRefcount(val) == 1) {
-        compressorDecompressStringObject(val);
+        compressionDecompressStringObject(val);
         return val;
     }
 
-    robj *copy = compressorCreatePlainCopy(val);
+    robj *copy = compressionCreatePlainCopy(val);
     if (plain_copies == NULL) plain_copies = listCreate();
     listAddNodeTail(plain_copies, copy);
-    compressor_plain_copies++;
+    compression_plain_copies++;
     return copy;
 }
 
-int compressorReleasePlainCopiesSince(unsigned long mark) {
+int compressionReleasePlainCopiesSince(unsigned long mark) {
     /* The copies of a command are at the end of the list, after the copies of
      * the command that runs it (EXEC, EVAL, a module command). The outer
      * command never uses them, and a reply that holds a copy keeps its own
      * reference. So a script that reads many keys during a child process
      * holds one copy at a time, not all of them. */
     int released = 0;
-    while (compressor_plain_copies > mark) {
+    while (compression_plain_copies > mark) {
         listNode *ln = listLast(plain_copies);
         /* Drops only our reference. A reply that holds the copy keeps it. */
         decrRefCount(listNodeValue(ln));
         listDelNode(plain_copies, ln);
-        compressor_plain_copies--;
+        compression_plain_copies--;
         released++;
     }
     return released;
 }
 
-int compressorReleasePlainCopies(void) {
-    return compressorReleasePlainCopiesSince(0);
+int compressionReleasePlainCopies(void) {
+    return compressionReleasePlainCopiesSince(0);
 }
 
-int compressorAfterCall(void) {
+int compressionAfterCall(void) {
     /* Inside a MULTI, a script, or a module call, call() releases the copies
      * of each inner command. */
     if (server.execution_nesting != 0) return 0;
-    return compressorReleasePlainCopies();
+    return compressionReleasePlainCopies();
 }

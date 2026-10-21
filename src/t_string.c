@@ -1037,8 +1037,12 @@ void appendCommand(client *c) {
 
 void strlenCommand(client *c) {
     robj *o;
-    if ((o = lookupKeyReadOrReply(c, c->argv[1], shared.czero)) == NULL ||
-        checkType(c, o, OBJ_STRING)) return;
+    /* The frame header holds the length, so a compressed value stays as it is. */
+    if ((o = lookupKeyReadWithFlags(c->db, c->argv[1], LOOKUP_NODECOMPRESS)) == NULL) {
+        addReply(c, shared.czero);
+        return;
+    }
+    if (checkType(c, o, OBJ_STRING)) return;
     addReplyLongLong(c, stringObjectLen(o));
 }
 

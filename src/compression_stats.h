@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#ifndef COMPRESSOR_STATS_H
-#define COMPRESSOR_STATS_H
+#ifndef COMPRESSION_STATS_H
+#define COMPRESSION_STATS_H
 
 /* The numbers behind INFO compression. See design-docs/inline-compression.md,
  * section 9.1, for what each one means.
@@ -28,13 +28,13 @@
 #include <stdatomic.h>
 #endif
 
-typedef struct compressorGauges {
+typedef struct compressionGauges {
     _Atomic(unsigned long long) compressed_values;
     _Atomic(unsigned long long) compressed_values_original_bytes;
     _Atomic(unsigned long long) compressed_values_bytes;
-} compressorGauges;
+} compressionGauges;
 
-typedef struct compressorCounters {
+typedef struct compressionCounters {
     /* The sweeper. */
     unsigned long long compression_total_keys_checked;
     unsigned long long compression_total_keys_eligible;
@@ -62,24 +62,24 @@ typedef struct compressorCounters {
     unsigned long long compression_total_values_decompressed;
     unsigned long long compression_total_temporary_copies_made;
     unsigned long long compression_total_decompression_time_us;
-} compressorCounters;
+} compressionCounters;
 
-typedef struct compressorStats {
-    compressorGauges gauges;
-    compressorCounters counters;
-} compressorStats;
+typedef struct compressionStats {
+    compressionGauges gauges;
+    compressionCounters counters;
+} compressionStats;
 
-extern compressorStats compressor_stats;
+extern compressionStats compression_stats;
 
 /* Adds or removes one compressed value from the gauges. original_bytes is
  * its plain size, and frame_bytes the memory of its frame. */
-void compressorStatsAddValue(size_t original_bytes, size_t frame_bytes);
-void compressorStatsRemoveValue(size_t original_bytes, size_t frame_bytes);
+void compressionStatsAddValue(size_t original_bytes, size_t frame_bytes);
+void compressionStatsRemoveValue(size_t original_bytes, size_t frame_bytes);
 
 /* CONFIG RESETSTAT. Resets the counters, not the gauges. */
-void compressorStatsReset(void);
+void compressionStatsReset(void);
 
 /* Appends the "# Compression" section to info, and returns it. */
-sds compressorStatsInfo(sds info);
+sds compressionStatsInfo(sds info);
 
-#endif /* COMPRESSOR_STATS_H */
+#endif /* COMPRESSION_STATS_H */

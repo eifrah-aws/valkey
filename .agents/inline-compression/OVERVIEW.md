@@ -4,7 +4,7 @@ Branch `valkey-inline-compression` (fork `eifrah-aws/valkey`). Design: `design-d
 
 ## Approach
 
-- **Background, not inline.** Writes store plain values as today. A sweeper on the main thread (`compressorCron()`, 10 calls per second) finds cold string values, copies each one into a job, and worker threads compress the copy with LZ4. Values from a primary or a slot import do not wait until they are cold: their key names are queued at once, before the sweeper.
+- **Background, not inline.** Writes store plain values as today. A sweeper on the main thread (`compressionCron()`, 10 calls per second) finds cold string values, copies each one into a job, and worker threads compress the copy with LZ4. Values from a primary or a slot import do not wait until they are cold: their key names are queued at once, before the sweeper.
 - **Cold means not used recently,** read from the object's own LRU/LFU field (LFU counter at most `compression-lfu-threshold`, or idle for 60 s); the sweeper never touches that field.
 - **Cursor scan.** The default policy walks all keys with `kvstoreScan()` and keeps its place between calls, so one pass checks each key one time; each call checks at most `compression-sweeper-samples` keys and buckets, and pauses for `compression-sweeper-backoff-seconds` after a pass that finds almost nothing. A `random` policy is kept for comparison.
 - **Safe install.** The main thread installs a result only if the key still holds the same bytes as the copy (`memcmp`), the value is still cold (not checked for values from a primary or a slot import), and the frame saves at least 10% of the allocated memory; no key is locked, so no client waits.

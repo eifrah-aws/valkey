@@ -4,16 +4,16 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-/* Tests for compressed string objects. See src/compressor/compressor_object.h. */
+/* Tests for compressed string objects. See src/compression_object.h. */
 
 #include "generated_wrappers.hpp"
 
 #include <string.h>
 
 extern "C" {
-#include "compressor/compressor_frame.h"
-#include "compressor/compressor_object.h"
-#include "compressor/compressor_stats.h"
+#include "compression_object.h"
+#include "compression_stats.h"
+#include "compression_value.h"
 #include "monotonic.h"
 #include "server.h"
 }
@@ -29,7 +29,7 @@ extern "C" {
 
 #define OBJECT_TEST_VALUE_CAP 2048
 
-class CompressorObjectTest : public ::testing::Test {
+class CompressionObjectTest : public ::testing::Test {
   protected:
     char value[OBJECT_TEST_VALUE_CAP];
     size_t value_len;
@@ -52,32 +52,32 @@ class CompressorObjectTest : public ::testing::Test {
     /* A RAW string object with the value, then compressed in place. */
     robj *createCompressed(const char *buf, size_t len) {
         robj *o = createRawStringObject(buf, len);
-        sds frame = compressorFrameBuild(compressorGetForMainThread(COMPRESSOR_ALG_LZ4), OBJ_ENCODING_RAW, buf, len, NULL);
+        sds frame = compressionValueBuild(compressionGetForMainThread(ALGO_LZ4), OBJ_ENCODING_RAW, buf, len, NULL);
         EXPECT_TRUE(frame != NULL);
-        compressorSetCompressedValue(o, frame);
+        compressionSetCompressedValue(o, frame);
         EXPECT_EQ(objectGetEncoding(o), OBJ_ENCODING_COMPRESSED);
         return o;
     }
 };
 
-TEST_F(CompressorObjectTest, SetCompressedThenDecompressInPlace) {
+TEST_F(CompressionObjectTest, SetCompressedThenDecompressInPlace) {
     robj *o = createCompressed(value, value_len);
     EXPECT_LT(sdslen((sds)objectGetVal(o)), value_len);
 
-    compressorDecompressStringObject(o);
+    compressionDecompressStringObject(o);
     EXPECT_EQ(objectGetEncoding(o), OBJ_ENCODING_RAW);
     ASSERT_EQ(sdslen((sds)objectGetVal(o)), value_len);
     EXPECT_EQ(memcmp(objectGetVal(o), value, value_len), 0);
     decrRefCount(o);
 }
 
-TEST_F(CompressorObjectTest, StringObjectLen) {
+TEST_F(CompressionObjectTest, StringObjectLen) {
     robj *o = createCompressed(value, value_len);
     EXPECT_EQ(stringObjectLen(o), value_len);
     decrRefCount(o);
 }
 
-TEST_F(CompressorObjectTest, CompareAndEqual) {
+TEST_F(CompressionObjectTest, CompareAndEqual) {
     robj *compressed = createCompressed(value, value_len);
     robj *same = createRawStringObject(value, value_len);
 
@@ -106,7 +106,7 @@ TEST_F(CompressorObjectTest, CompareAndEqual) {
     decrRefCount(other);
 }
 
-TEST_F(CompressorObjectTest, GetDecodedObjectGivesPlainCopy) {
+TEST_F(CompressionObjectTest, GetDecodedObjectGivesPlainCopy) {
     robj *o = createCompressed(value, value_len);
     robj *dec = getDecodedObject(o);
     ASSERT_TRUE(dec != o);
@@ -118,16 +118,16 @@ TEST_F(CompressorObjectTest, GetDecodedObjectGivesPlainCopy) {
     decrRefCount(o);
 }
 
-TEST_F(CompressorObjectTest, FreeAndSizeWithAFrame) {
-    unsigned long long values = compressor_stats.gauges.compressed_values;
-    unsigned long long original = compressor_stats.gauges.compressed_values_original_bytes;
-    unsigned long long frames = compressor_stats.gauges.compressed_values_bytes;
+TEST_F(CompressionObjectTest, FreeAndSizeWithAFrame) {
+    unsigned long long values = compression_stats.gauges.compressed_values;
+    unsigned long long original = compression_stats.gauges.compressed_values_original_bytes;
+    unsigned long long frames = compression_stats.gauges.compressed_values_bytes;
 
     robj *o = createCompressed(value, value_len);
-    size_t frame_alloc = compressorFrameAllocSize((sds)objectGetVal(o));
-    EXPECT_EQ(compressor_stats.gauges.compressed_values, values + 1);
-    EXPECT_EQ(compressor_stats.gauges.compressed_values_original_bytes, original + value_len);
-    EXPECT_EQ(compressor_stats.gauges.compressed_values_bytes, frames + frame_alloc);
+    size_t frame_alloc = compressionValueAllocSize((sds)objectGetVal(o));
+    EXPECT_EQ(compression_stats.gauges.compressed_values, values + 1);
+    EXPECT_EQ(compression_stats.gauges.compressed_values_original_bytes, original + value_len);
+    EXPECT_EQ(compression_stats.gauges.compressed_values_bytes, frames + frame_alloc);
 
     /* MEMORY USAGE counts the frame, not the plain value. */
     size_t size = objectComputeSize(NULL, o, 0, 0);
@@ -136,23 +136,23 @@ TEST_F(CompressorObjectTest, FreeAndSizeWithAFrame) {
 
     /* The free removes the value from the gauges. */
     decrRefCount(o);
-    EXPECT_EQ(compressor_stats.gauges.compressed_values, values);
-    EXPECT_EQ(compressor_stats.gauges.compressed_values_original_bytes, original);
-    EXPECT_EQ(compressor_stats.gauges.compressed_values_bytes, frames);
+    EXPECT_EQ(compression_stats.gauges.compressed_values, values);
+    EXPECT_EQ(compression_stats.gauges.compressed_values_original_bytes, original);
+    EXPECT_EQ(compression_stats.gauges.compressed_values_bytes, frames);
 }
 
-TEST_F(CompressorObjectTest, DupStringObjectCopiesTheFrame) {
+TEST_F(CompressionObjectTest, DupStringObjectCopiesTheFrame) {
     robj *o = createCompressed(value, value_len);
-    unsigned long long before = compressor_stats.gauges.compressed_values;
+    unsigned long long before = compression_stats.gauges.compressed_values;
     robj *d = dupStringObject(o);
     ASSERT_TRUE(d != o);
     EXPECT_EQ(objectGetEncoding(d), OBJ_ENCODING_COMPRESSED);
     EXPECT_TRUE(objectGetVal(d) != objectGetVal(o));
-    EXPECT_EQ(compressor_stats.gauges.compressed_values, before + 1);
+    EXPECT_EQ(compression_stats.gauges.compressed_values, before + 1);
     EXPECT_EQ(equalStringObjects(o, d), 1);
 
     /* The copy is a frame of its own: it can be decompressed alone. */
-    compressorDecompressStringObject(d);
+    compressionDecompressStringObject(d);
     ASSERT_EQ(sdslen((sds)objectGetVal(d)), value_len);
     EXPECT_EQ(memcmp(objectGetVal(d), value, value_len), 0);
     EXPECT_EQ(objectGetEncoding(o), OBJ_ENCODING_COMPRESSED);
@@ -160,31 +160,31 @@ TEST_F(CompressorObjectTest, DupStringObjectCopiesTheFrame) {
     decrRefCount(o);
 }
 
-TEST_F(CompressorObjectTest, CreateFromFrameKeepsTheFrame) {
-    unsigned long long values = compressor_stats.gauges.compressed_values;
-    unsigned long long original = compressor_stats.gauges.compressed_values_original_bytes;
-    sds frame = compressorFrameBuild(compressorGetForMainThread(COMPRESSOR_ALG_LZ4), OBJ_ENCODING_RAW, value, value_len, NULL);
+TEST_F(CompressionObjectTest, CreateFromFrameKeepsTheFrame) {
+    unsigned long long values = compression_stats.gauges.compressed_values;
+    unsigned long long original = compression_stats.gauges.compressed_values_original_bytes;
+    sds frame = compressionValueBuild(compressionGetForMainThread(ALGO_LZ4), OBJ_ENCODING_RAW, value, value_len, NULL);
     ASSERT_TRUE(frame != NULL);
     const char *reason = NULL;
-    robj *o = compressorCreateStringObjectFromFrame(frame, &reason);
+    robj *o = compressionCreateStringObjectFromFrame(frame, &reason);
     ASSERT_TRUE(o != NULL);
     EXPECT_EQ(objectGetEncoding(o), OBJ_ENCODING_COMPRESSED);
     EXPECT_TRUE(objectGetVal(o) == frame);
-    EXPECT_EQ(compressorStringObjectLen(o), value_len);
-    EXPECT_EQ(compressor_stats.gauges.compressed_values, values + 1);
-    EXPECT_EQ(compressor_stats.gauges.compressed_values_original_bytes, original + value_len);
+    EXPECT_EQ(compressionStringObjectLen(o), value_len);
+    EXPECT_EQ(compression_stats.gauges.compressed_values, values + 1);
+    EXPECT_EQ(compression_stats.gauges.compressed_values_original_bytes, original + value_len);
 
-    sds plain = compressorDecompressToSds(o);
+    sds plain = compressionDecompressToSds(o);
     ASSERT_EQ(sdslen(plain), value_len);
     EXPECT_EQ(memcmp(plain, value, value_len), 0);
     sdsfree(plain);
     decrRefCount(o);
-    EXPECT_EQ(compressor_stats.gauges.compressed_values, values);
+    EXPECT_EQ(compression_stats.gauges.compressed_values, values);
 }
 
-TEST_F(CompressorObjectTest, CreateFromFrameRefusesABadFrame) {
-    unsigned long long values = compressor_stats.gauges.compressed_values;
-    sds good = compressorFrameBuild(compressorGetForMainThread(COMPRESSOR_ALG_LZ4), OBJ_ENCODING_RAW, value, value_len, NULL);
+TEST_F(CompressionObjectTest, CreateFromFrameRefusesABadFrame) {
+    unsigned long long values = compression_stats.gauges.compressed_values;
+    sds good = compressionValueBuild(compressionGetForMainThread(ALGO_LZ4), OBJ_ENCODING_RAW, value, value_len, NULL);
     ASSERT_TRUE(good != NULL);
 
     /* Each case changes one byte of the header: algorithm, format version,
@@ -198,16 +198,16 @@ TEST_F(CompressorObjectTest, CreateFromFrameRefusesABadFrame) {
         else
             bad[offsets[i]] = (char)bytes[i];
         const char *reason = NULL;
-        EXPECT_TRUE(compressorCreateStringObjectFromFrame(bad, &reason) == NULL) << "case " << i;
+        EXPECT_TRUE(compressionCreateStringObjectFromFrame(bad, &reason) == NULL) << "case " << i;
         EXPECT_TRUE(reason != NULL) << "case " << i;
         sdsfree(bad);
     }
 
     /* A frame with no body. */
-    sds shorter = sdsnewlen(good, COMPRESSOR_FRAME_HEADER_LEN);
+    sds shorter = sdsnewlen(good, COMPRESSION_VALUE_HEADER_LEN);
     const char *reason = NULL;
-    EXPECT_TRUE(compressorCreateStringObjectFromFrame(shorter, &reason) == NULL);
+    EXPECT_TRUE(compressionCreateStringObjectFromFrame(shorter, &reason) == NULL);
     sdsfree(shorter);
     sdsfree(good);
-    EXPECT_EQ(compressor_stats.gauges.compressed_values, values);
+    EXPECT_EQ(compression_stats.gauges.compressed_values, values);
 }

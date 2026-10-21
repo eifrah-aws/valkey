@@ -28,8 +28,8 @@
  */
 
 #include "server.h"
-#include "compressor/compressor_object.h"
-#include "compressor/compressor_workers.h"
+#include "compression_object.h"
+#include "compression_workers.h"
 #include "listpack.h"
 #include "hotkeys.h"
 #include "ordered_index.h"
@@ -126,7 +126,7 @@ robj *lookupKey(serverDb *db, robj *key, int flags) {
         /* TODO: Use separate hits stats for WRITE */
 
         /* Callers get a compressed value only when they ask for it. */
-        if (unlikely(val->encoding == OBJ_ENCODING_COMPRESSED)) val = compressorLookupValue(val, flags);
+        if (unlikely(val->encoding == OBJ_ENCODING_COMPRESSED)) val = compressionLookupValue(val, flags);
     } else {
         if (!(flags & (LOOKUP_NONOTIFY | LOOKUP_WRITE))) notifyKeyspaceEvent(NOTIFY_KEY_MISS, "keymiss", key, db->id);
         if (!(flags & (LOOKUP_NOSTATS | LOOKUP_WRITE))) server.stat_keyspace_misses++;
@@ -794,7 +794,7 @@ void signalModifiedKey(client *c, serverDb *db, robj *key) {
     touchWatchedKey(db, key);
     trackingInvalidateKey(c, key, 1);
     bgIteration_keyModified(db->id, objectGetVal(key));
-    compressorKeyModified(c, db, key);
+    compressionKeyModified(c, db, key);
 }
 
 void signalFlushedDb(int dbid, int async) {

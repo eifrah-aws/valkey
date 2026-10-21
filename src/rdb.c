@@ -34,7 +34,7 @@
 
 #include "hashtable.h"
 #include "server.h"
-#include "compressor/compressor_object.h"
+#include "compression_object.h"
 #include "ordered_index.h"
 #include "lzf.h" /* LZF compression library */
 #include "zipmap.h"
@@ -593,9 +593,9 @@ ssize_t rdbSaveStringObject(rio *rdb, robj *obj) {
      * object is already integer encoded. */
     if (obj->encoding == OBJ_ENCODING_INT) {
         return rdbSaveLongLongAsStringObject(rdb, (long)objectGetVal(obj));
-    } else if (compressorIsCompressedString(obj)) {
+    } else if (compressionIsCompressedString(obj)) {
         /* Saved as a plain string for now. The RDB format change comes later. */
-        sds plain = compressorDecompressToSds(obj);
+        sds plain = compressionDecompressToSds(obj);
         ssize_t written = rdbSaveRawString(rdb, (unsigned char *)plain, sdslen(plain));
         sdsfree(plain);
         return written;
@@ -764,7 +764,7 @@ int rdbGetObjectType(robj *o, int rdbver) {
     switch (objectGetType(o)) {
     case OBJ_STRING:
         /* An older target gets the plain bytes (rdbSaveStringObject()). */
-        if (compressorIsCompressedString(o) && rdbver >= 82) return RDB_TYPE_STRING_COMPRESSED;
+        if (compressionIsCompressedString(o) && rdbver >= 82) return RDB_TYPE_STRING_COMPRESSED;
         return RDB_TYPE_STRING;
     case OBJ_LIST:
         if (objectGetEncoding(o) == OBJ_ENCODING_QUICKLIST || objectGetEncoding(o) == OBJ_ENCODING_LISTPACK)
@@ -924,7 +924,7 @@ ssize_t rdbSaveStreamConsumers(rio *rdb, streamCG *cg) {
 ssize_t rdbSaveObject(rio *rdb, robj *o, robj *key, int dbid, unsigned char rdbtype) {
     ssize_t n = 0, nwritten = 0;
     if (rdbtype == RDB_TYPE_STRING_COMPRESSED) {
-        if ((n = compressorRdbSaveCompressedString(rdb, o)) == -1) return -1;
+        if ((n = compressionRdbSaveCompressedString(rdb, o)) == -1) return -1;
         nwritten += n;
     } else if (objectGetType(o) == OBJ_STRING) {
         /* Save a string value */
@@ -2169,7 +2169,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error, int rd
         if ((o = rdbLoadEncodedStringObject(rdb)) == NULL) return NULL;
         o = tryObjectEncodingEx(o, 0);
     } else if (rdbtype == RDB_TYPE_STRING_COMPRESSED) {
-        if ((o = compressorRdbLoadCompressedString(rdb)) == NULL) return NULL;
+        if ((o = compressionRdbLoadCompressedString(rdb)) == NULL) return NULL;
     } else if (rdbtype == RDB_TYPE_LIST) {
         /* Read list value */
         if ((len = rdbLoadLen(rdb, NULL)) == RDB_LENERR) return NULL;

@@ -48,7 +48,7 @@ A command that mutates a compressed value first gets its logical, uncompressed r
 
 Slot migration receives uncompressed logical values. When compression is enabled, the destination compresses each eligible value at once, without the coldness test of the sweeper. It uses the destination's algorithm and active dictionary when applicable. It also applies the same size, format, and net-savings checks as the background path. If the value is ineligible or compression provides no saving, the value stays plain.
 
-The import client installs the plain value as usual. `signalModifiedKey()` then calls `compressorKeyModified()`, which adds only the key name to a set of incoming keys (no value copy, and one entry per key however often it is written). On each event loop (`compressorBeforeSleep()`) and each cron call, the main thread takes keys from the set, oldest first, while there is room in `compression-max-inflight-requests`, and queues normal compression jobs for them (§6.2). The jobs are marked, so the install skips the coldness test, but keeps the byte compare and the net-savings guard (§6.3, §6.4). Incoming keys go before the sweeper. A key that is deleted or changed while it waits is skipped, or its frame is dropped at install. A key that already has a job in flight (from the sweeper, or for an older value) stays in the set and is tried again after that job is done, because that job is dropped at install when the value changed.
+The import client installs the plain value as usual. `signalModifiedKey()` then calls `compressionKeyModified()`, which adds only the key name to a set of incoming keys (no value copy, and one entry per key however often it is written). On each event loop (`compressionBeforeSleep()`) and each cron call, the main thread takes keys from the set, oldest first, while there is room in `compression-max-inflight-requests`, and queues normal compression jobs for them (§6.2). The jobs are marked, so the install skips the coldness test, but keeps the byte compare and the net-savings guard (§6.3, §6.4). Incoming keys go before the sweeper. A key that is deleted or changed while it waits is skipped, or its frame is dropped at install. A key that already has a job in flight (from the sweeper, or for an older value) stays in the set and is tried again after that job is done, because that job is dropped at install when the value changed.
 
 Not waiting is deliberate. Installing every migrated value as plain data and waiting for the sweeper could cause a memory spike proportional to the imported slot: a new key is hot, and the snapshot touches a key with a TTL a second time (`PEXPIREAT`). With the queue, the extra plain memory is the values that wait for a worker. The import is not slowed down by compression on the main thread. It also keeps the destination independent of the source node's algorithm and dictionary set.
 
@@ -170,9 +170,9 @@ Retraining is triggered by drift: when the live compression ratio gets clearly w
 
 ### 6.1 Choosing a value
 
-On each `compressorCron()` call, the sweeper first checks `compression-max-inflight-requests`. An in-flight request remains counted from enqueue until the main thread installs or discards its result, including queued, running, and completed-but-not-drained jobs. If the in-flight count has reached `compression-max-inflight-requests`, 1000 by default, the sweeper does not sample.
+On each `compressionCron()` call, the sweeper first checks `compression-max-inflight-requests`. An in-flight request remains counted from enqueue until the main thread installs or discards its result, including queued, running, and completed-but-not-drained jobs. If the in-flight count has reached `compression-max-inflight-requests`, 1000 by default, the sweeper does not sample.
 
-When capacity exists, the sweeper picks keys with one of two policies, set by `compression-sweeper-policy`: `cursor` (the default) or `random`. Both look at no more than `compression-sweeper-samples` keys per cron call, 500 by default (from the benchmark, §6.1.1). It is a separate setting from `compression-max-inflight-requests`, so a large in-flight cap does not add work to one cron call. `random` reads the samples in batches of `COMPRESSOR_SWEEPER_SAMPLE_BATCH` (128), so its array on the stack does not grow with the setting. The policy can change at runtime. The cursor keeps its place when the policy changes.
+When capacity exists, the sweeper picks keys with one of two policies, set by `compression-sweeper-policy`: `cursor` (the default) or `random`. Both look at no more than `compression-sweeper-samples` keys per cron call, 500 by default (from the benchmark, §6.1.1). It is a separate setting from `compression-max-inflight-requests`, so a large in-flight cap does not add work to one cron call. `random` reads the samples in batches of `COMPRESSION_SWEEPER_SAMPLE_BATCH` (128), so its array on the stack does not grow with the setting. The policy can change at runtime. The cursor keeps its place when the policy changes.
 
 **`cursor`.** The sweeper scans all databases with `kvstoreScan()`, one bucket at a time. It keeps the database index and cursor between cron calls. When a database cursor returns to 0, the sweeper moves to the next database. After the last database, the pass is complete and `compression_total_sweeper_passes` increases. One pass checks each key once.
 
@@ -180,9 +180,9 @@ One cron call visits at most `compression-sweeper-samples` buckets, so a table w
 
 Keys remain in the same order if the bucket does not change. If it changes, a key may be checked twice or wait for the next pass. Each call handles at least one new key from the bucket, so a value that is queued again, such as one that does not compress, cannot block later keys. `kvstoreScan()` handles rehashing, `FLUSHALL`, and `SWAPDB`. At worst, a key is checked twice or waits for the next pass. It also skips importing hashtables.
 
-**Backoff (`cursor` only).** When the data is stable, each pass checks every key and finds nothing. At the end of a pass, the sweeper pauses for `compression-sweeper-backoff-seconds` if fewer than `COMPRESSOR_BACKOFF_MIN_ELIGIBLE_PCT` (1%) of the checked keys were eligible. The default pause is 60 seconds; 0 disables backoff.
+**Backoff (`cursor` only).** When the data is stable, each pass checks every key and finds nothing. At the end of a pass, the sweeper pauses for `compression-sweeper-backoff-seconds` if fewer than `COMPRESSION_BACKOFF_MIN_ELIGIBLE_PCT` (1%) of the checked keys were eligible. The default pause is 60 seconds; 0 disables backoff.
 
-A pass that checks no keys does not pause. For example, a scan skips importing slots during slot import, and those keys should be compressed soon after the import ends. While paused, `compressorCron()` returns immediately and `compression_sweeper_paused` is 1. The pause uses the monotonic clock. After it ends, a new pass starts.
+A pass that checks no keys does not pause. For example, a scan skips importing slots during slot import, and those keys should be compressed soon after the import ends. While paused, `compressionCron()` returns immediately and `compression_sweeper_paused` is 1. The pause uses the monotonic clock. After it ends, a new pass starts.
 
 Changing the setting wakes the sweeper immediately. `CONFIG SET` does not call the apply function when the value is unchanged. If this wake occurs in the middle of a pass, that pass cannot start a pause when it ends because part of the keyspace was scanned before the wake. If the setting changes during a pause, the next pass starts from the beginning and may start another pause when it finishes.
 
@@ -194,7 +194,7 @@ The threshold is 1%, rather than 0%, because a pass over 1 million keys that fin
 
 The sweeper reads each sampled database entry directly. Sampling must not perform a normal key lookup, refresh LRU/LFU metadata, or add the key to the hot-key LRU. Candidate discovery is not a client access.
 
-A sampled value is cold according to the access metadata selected by the maxmemory policy. In LFU mode, the sweeper applies normal LFU decay and accepts a frequency at or below `compression-lfu-threshold`, 4 by default. A new key starts at 5 (`LFU_INIT_VAL`), so it is hot after it is written. With the default `lfu-decay-time` of 1, the counter decays to 4 within one minute, like the 60-second idle test in LRU mode. With `lfu-decay-time 0`, the counter never decays, and a new key is never compressed, unless `compression-lfu-threshold` is 5 or more. In LRU and `noeviction` modes, it accepts an idle time at or above `COMPRESSOR_MIN_IDLE_SECONDS`, 60 seconds (a fixed value in v1, section 9). The object's 24-bit field stores one of these forms, so the sweeper never applies both tests.
+A sampled value is cold according to the access metadata selected by the maxmemory policy. In LFU mode, the sweeper applies normal LFU decay and accepts a frequency at or below `compression-lfu-threshold`, 4 by default. A new key starts at 5 (`LFU_INIT_VAL`), so it is hot after it is written. With the default `lfu-decay-time` of 1, the counter decays to 4 within one minute, like the 60-second idle test in LRU mode. With `lfu-decay-time 0`, the counter never decays, and a new key is never compressed, unless `compression-lfu-threshold` is 5 or more. In LRU and `noeviction` modes, it accepts an idle time at or above `COMPRESSION_MIN_IDLE_SECONDS`, 60 seconds (a fixed value in v1, section 9). The object's 24-bit field stores one of these forms, so the sweeper never applies both tests.
 
 After the coldness test, the sweeper takes a value only if a compression backend is active and the value is `OBJ_STRING`, `OBJ_ENCODING_RAW`, sole-owner (`refcount == 1`), within the size limits, and absent from the internal hot-key LRU (§7.3). The hot-key LRU is an independent first-line exclusion: it blocks recently read keys before object metadata is evaluated, while the policy-specific coldness gate remains a fallback if that bounded LRU evicts an entry. Compressing a hot key would waste worker CPU and make its next read pay synchronous decompression again.
 
@@ -222,7 +222,7 @@ Two rules keep this honest. The list does **not** need to be complete: the net-s
 
 `INFO compression` counts values skipped this way, so an operator can see that a keyspace is full of images instead of guessing why the ratio is flat.
 
-**Where it runs.** `compressorCron()`, called from `serverCron()`, picks keys and queues jobs. With `random`, the database is picked with a 64-bit random number (`genrand64_int64()` with rejection sampling), so a key count above 2^31 is covered. A small in-flight set, keyed by database and key, keeps a key out of two jobs at once. `compressorBeforeSleep()`, called from `beforeSleep()`, installs the finished frames (§6.3). Each call site costs one check when compression is off.
+**Where it runs.** `compressionCron()`, called from `serverCron()`, picks keys and queues jobs. With `random`, the database is picked with a 64-bit random number (`genrand64_int64()` with rejection sampling), so a key count above 2^31 is covered. A small in-flight set, keyed by database and key, keeps a key out of two jobs at once. `compressionBeforeSleep()`, called from `beforeSleep()`, installs the finished frames (§6.3). Each call site costs one check when compression is off.
 
 **Pause during a child process.** While a child process runs (`BGSAVE`, `BGREWRITEAOF`), the sweeper neither queues new jobs nor installs finished frames. Installing a frame frees the plain value and writes a new buffer. This changes memory that the child still shares and forces the kernel to copy those pages. Finished jobs therefore remain queued until the child exits. The byte comparison during installation (§6.3) detects any value change made while they wait.
 
@@ -256,7 +256,7 @@ A benchmark with about 1M keys (`random`, 100 samples per call for most of the r
 **Next steps.**
 - Backoff: done for `cursor` (section 6.1): pause after a pass in which less than 1% of the checked keys were eligible. This removes most of the waste when the data is stable. `random` has no backoff.
 - Hot-key LRU expiry (section 7.3, Phase 4): when a key leaves the hot-key list after 60 s, it is a good candidate to compress again. The sweeper can check these keys first, in place of a full search.
-- Defaults, from the benchmark below: `compression-sweeper-policy cursor`, `compression-sweeper-samples 500`, and `compression-max-inflight-requests 1000`. With 1000 jobs in flight, `cursor` compressed 99% of 1M values in 362 s; with 100, it compressed 487,583 values in 600 s. `random` needed 11,802,752 checks for 99% (2000 samples). The benchmark (`.agents/inline-compression/bench/compression-bench.sh`, scenarios in `.agents/inline-compression/bench/scenarios.txt`) runs a baseline without compression, then `cursor` with changes to the backoff, the samples, `compression-threads`, `compression-max-inflight-requests` and `--io-threads`, and then `random`. Each scenario loads the data, watches the compression for 10 minutes, and runs GET over 10%, 30%, 50% and 100% of the keys. The results of the 2026-10-18 runs are in `.agents/inline-compression/bench/RESULTS-2026-10-18.md`, and the runs with `activedefrag yes` in `.agents/inline-compression/bench/RESULTS-2026-10-18-defrag.md`. With only part of the values compressed, RSS stays high without active defrag, because freed values leave holes in pages; with active defrag, RSS follows `used_memory`.
+- Defaults, from the benchmark below: `compression-sweeper-policy cursor`, `compression-sweeper-samples 500`, and `compression-max-inflight-requests 1000`. With 1000 jobs in flight, `cursor` compressed 99% of 1M values in 362 s; with 100, it compressed 487,583 values in 600 s. `random` needed 11,802,752 checks for 99% (2000 samples). The benchmark runs a baseline without compression, then `cursor` with changes to the backoff, the samples, `compression-threads`, `compression-max-inflight-requests` and `--io-threads`, and then `random`. Each scenario loads the data, watches the compression for 10 minutes, and runs GET over 10%, 30%, 50% and 100% of the keys. With only part of the values compressed, RSS stays high without active defrag, because freed values leave holes in pages; with active defrag, RSS follows `used_memory`.
 
 ### 6.2 The worker must not race the main thread
 
@@ -301,7 +301,7 @@ With the byte compare, a write always runs at once. If it changes a key with a p
 
 ### 6.4 What gets stored: the compression frame
 
-The worker's output is one SDS string: a 10-byte, self-describing header followed by the compressed bytes (the body). See `src/compressor/compressor_frame.h`.
+The worker's output is one SDS string: a 10-byte, self-describing header followed by the compressed bytes (the body).
 
 | Offset | Size | Field | Meaning |
 |---|---|---|---|
@@ -322,11 +322,11 @@ Fields deliberately left out:
 
 `max_output_size()` returns a generous bound, so the code shrinks the frame to its real length after compression. Without this step, the allocator would still charge for unused capacity and the reported savings would exceed the actual savings.
 
-Finally, a **net-savings guard** compares **allocation sizes**, not string lengths. It compares the memory used by the frame with the memory used by the plain value (`zmalloc_size`). The allocator rounds each request up to a size class, so a shorter string may still use the same amount of memory (Appendix A). If the frame does not save at least `COMPRESSOR_MIN_SAVINGS_PCT` percent (10; a fixed value in v1, §9), it is dropped. The worker also drops a frame that is not shorter than its input. Incompressible data therefore costs one failed attempt but adds no permanent memory overhead.
+Finally, a **net-savings guard** compares **allocation sizes**, not string lengths. It compares the memory used by the frame with the memory used by the plain value (`zmalloc_size`). The allocator rounds each request up to a size class, so a shorter string may still use the same amount of memory (Appendix A). If the frame does not save at least `COMPRESSION_MIN_SAVINGS_PCT` percent (10; a fixed value in v1, §9), it is dropped. The worker also drops a frame that is not shorter than its input. Incompressible data therefore costs one failed attempt but adds no permanent memory overhead.
 
-Errors are codes, not logs. A frame function sets `compressorAlg.last_error` (for example `COMPRESSOR_ERR_FRAME_VERSION` or `COMPRESSOR_ERR_DICTIONARY_MISMATCH`), and the caller, which knows the key, decides what to log and count.
+Errors are codes, not logs. A function of the block layer sets `blockCompressor.last_error` (for example `BLOCK_COMPRESSOR_ERR_DECOMPRESS`). The frame layer, which comes in a later PR, adds its own codes to the same list, for example for an unknown format version or a dictionary mismatch. The caller, which knows the key, decides what to log and count.
 
-Frames created locally are trusted internal objects. Frames loaded from RDB are persisted input and must be validated before installation: supported algorithm, known format version, valid lengths, and a resolvable dictionary reference when `dict_id` is nonzero (§3.3). `RESTORE` payloads come from clients, and a read stops the server on a frame that does not decompress, so the load also decompresses the body once into a temporary buffer and checks its length (`compressorCreateStringObjectFromFrame()`).
+Frames created locally are trusted internal objects. Frames loaded from RDB are persisted input and must be validated before installation: supported algorithm, known format version, valid lengths, and a resolvable dictionary reference when `dict_id` is nonzero (§3.3). `RESTORE` payloads come from clients, and a read stops the server on a frame that does not decompress, so the load also decompresses the body once into a temporary buffer and checks its length (`compressionCreateStringObjectFromFrame()`).
 
 ---
 
@@ -334,32 +334,32 @@ Frames created locally are trusted internal objects. Frames loaded from RDB are 
 
 ### 7.1 How we know a value is compressed
 
-Valkey uses a new object encoding, `OBJ_ENCODING_COMPRESSED` (14). The `encoding` field has 4 bits, and only values 14 and 15 were free. The same encoding applies to every type and algorithm. `robj->type` identifies the object type, while the frame header identifies the algorithm and the encoding to rebuild (§6.4). String code checks both the type and encoding through `compressorIsCompressedString()`. This single `robj` field shows whether the bytes need decompression, with no side table or separate per-value flag. `OBJECT ENCODING` reports `compressed`.
+Valkey uses a new object encoding, `OBJ_ENCODING_COMPRESSED` (14). The `encoding` field has 4 bits, and only values 14 and 15 were free. The same encoding applies to every type and algorithm. `robj->type` identifies the object type, while the frame header identifies the algorithm and the encoding to rebuild (§6.4). String code checks both the type and encoding through `compressionIsCompressedString()`. This single `robj` field shows whether the bytes need decompression, with no side table or separate per-value flag. `OBJECT ENCODING` reports `compressed`.
 
 This approach requires an audit of every site that reads `obj->encoding` directly. These sites fall into four groups:
 
 - **Client read** → synchronously decompress in v1, keep the plain value in the keyspace, release the frame, and mark the key hot (§7.2 and §7.3). During a child process, and for module read handles, use a temporary plain copy instead (§7.2).
 - **Need plaintext for another egress path** → synchronously decompress into a temporary value without changing the keyspace: slot migration, replication propagation that materializes a stored value, a full sync to a replica that supports only an older RDB version, and `DEBUG DIGEST`.
 - **Preserve the stored representation** → do not decompress: RDB save and `DUMP` copy the frame and persist its referenced decoder metadata and dictionary (§4.3).
-- **Only inspect or release the object** → do not decompress: object free (the registry drops the dictionary's user count when applicable, and the backend's optional `release()` hook drops any per-frame library state), `MEMORY USAGE`, and active defragmentation. Today the free path (`compressorStringObjectFreed()`) reads the frame header once, for the gauges and for `releaseFrameDictionary()`. That function only checks that `dict_id` is 0, because no frame has a dictionary before Phase 10. Phase 10 cannot drop the count or call `release()` there as it is: a free can run on a background thread (`FLUSHALL ASYNC`), and each `compressorAlg` instance belongs to one thread.
+- **Only inspect or release the object** → do not decompress: object free (the registry drops the dictionary's user count when applicable, and the backend's optional `release()` hook drops any per-frame library state), `MEMORY USAGE`, and active defragmentation. Today the free path (`compressionStringObjectFreed()`) reads the frame header once, for the gauges and for `releaseFrameDictionary()`. That function only checks that `dict_id` is 0, because no frame has a dictionary before Phase 10. Phase 10 cannot drop the count or call `release()` there as it is: a free can run on a background thread (`FLUSHALL ASYNC`), and each `blockCompressor` instance belongs to one thread.
 
 `DEBUG COMPRESS-KEY <key>` compresses one value now, on the main thread, for tests. It makes the same checks as the sweeper, except the coldness test, and keeps the net-savings guard. It does not change the sweeper counters, so their sums stay right; the `compressed_*` gauges change as usual. It replies `OK`, or an error with the reason. Compressing a value (by the sweeper or by this command) and decompressing it in place send no keyspace events, because the logical value does not change.
 
 ### 7.2 The read helper
 
-Client reads go through `lookupKey()`, which all commands use to find a key. When it finds a compressed string, it calls `compressorLookupValue()` (`src/compressor/compressor_object.c`). Commands do not change, so no command can get a frame by mistake, and new commands are covered too. An inline check of the encoding comes first, so a lookup of a plain value costs one branch.
+Client reads go through `lookupKey()`, which all commands use to find a key. When it finds a compressed string, it calls `compressionLookupValue()`. Commands do not change, so no command can get a frame by mistake, and new commands are covered too. An inline check of the encoding comes first, so a lookup of a plain value costs one branch.
 
-`compressorLookupValue()` returns:
+`compressionLookupValue()` returns:
 
-- **The value as it is**, when the caller passes `LOOKUP_NODECOMPRESS`. Commands that do not read the bytes do this, so they do not change the key: `OBJECT`, `DEBUG OBJECT`, `TYPE`, `EXISTS`, `TTL`/`PTTL`/`EXPIRETIME`/`PEXPIRETIME`, `TOUCH`, `EXPIRE`/`PEXPIRE`/`EXPIREAT`/`PEXPIREAT`, `PERSIST`, `RENAME`/`RENAMENX`, `MOVE`, `COPY` (source and destination), and `STRLEN`, which reads the plain length from the frame header (`uncompressed_len`) without decompressing. `DUMP` and `MIGRATE` do it too: the RDB code writes the frame into the payload as it is (§4.3), and `RESTORE` keeps it compressed. `COPY` copies the frame (`compressorDupFrame()`), so the new key is compressed too, and both count in `compressed_values`. Lookups that only check whether a key exists, or its type, do it too: `SET` (it replaces the value; `IFEQ`/`IFNE` compare through a temporary plain copy), `SET NX/XX`, `MSETNX`, `MSETEX NX/XX`, `setKey()`, `RESTORE` without `REPLACE`, `VM_KeyExists()`, `getNodeByQuery()`, and the blocked-client type check in `blocked.c`. So a failed `SET NX` leaves the value compressed. `MEMORY USAGE` uses `dbFind()` and does not decompress either. `LOOKUP_NOEFFECTS` does not include `LOOKUP_NODECOMPRESS`, because a module can open a key with NOEFFECTS and still read its bytes.
+- **The value as it is**, when the caller passes `LOOKUP_NODECOMPRESS`. Commands that do not read the bytes do this, so they do not change the key: `OBJECT`, `DEBUG OBJECT`, `TYPE`, `EXISTS`, `TTL`/`PTTL`/`EXPIRETIME`/`PEXPIRETIME`, `TOUCH`, `EXPIRE`/`PEXPIRE`/`EXPIREAT`/`PEXPIREAT`, `PERSIST`, `RENAME`/`RENAMENX`, `MOVE`, `COPY` (source and destination), and `STRLEN`, which reads the plain length from the frame header (`uncompressed_len`) without decompressing. `DUMP` and `MIGRATE` do it too: the RDB code writes the frame into the payload as it is (§4.3), and `RESTORE` keeps it compressed. `COPY` copies the frame (`compressionDupFrame()`), so the new key is compressed too, and both count in `compressed_values`. Lookups that only check whether a key exists, or its type, do it too: `SET` (it replaces the value; `IFEQ`/`IFNE` compare through a temporary plain copy), `SET NX/XX`, `MSETNX`, `MSETEX NX/XX`, `setKey()`, `RESTORE` without `REPLACE`, `VM_KeyExists()`, `getNodeByQuery()`, and the blocked-client type check in `blocked.c`. So a failed `SET NX` leaves the value compressed. `MEMORY USAGE` uses `dbFind()` and does not decompress either. `LOOKUP_NOEFFECTS` does not include `LOOKUP_NODECOMPRESS`, because a module can open a key with NOEFFECTS and still read its bytes.
 - **The stored value, decompressed in place**, for a write (`LOOKUP_WRITE`), or for a read when no child process runs. Only the value buffer and the encoding change. The object, its key, its TTL, and its LRU/LFU data stay the same. The key is then hot (§7.3).
-- **A temporary plain copy**, for a read while a child process runs. The copy has the same key, TTL, and LRU/LFU data, because a caller may read them from the object. Callers are commands that read the bytes, for example `GET` and `GETRANGE`. The stored frame does not change, so the read causes no copy-on-write (§6.1). The copy goes on a cleanup list. `call()` notes the length of the list when a command starts, and `compressorReleasePlainCopiesSince()` releases the copies added after that when the command ends, also for a command inside a `MULTI`, a script, or a module call. `compressorAfterCall()` in `afterCommand()` releases all copies when the outermost command ends, and `compressorBeforeSleep()` also releases them, as a safety net. `PFCOUNT` looks up with `LOOKUP_NODECOMPRESS` and decompresses the stored value in place, because it writes its cached count into it.
+- **A temporary plain copy**, for a read while a child process runs. The copy has the same key, TTL, and LRU/LFU data, because a caller may read them from the object. Callers are commands that read the bytes, for example `GET` and `GETRANGE`. The stored frame does not change, so the read causes no copy-on-write (§6.1). The copy goes on a cleanup list. `call()` notes the length of the list when a command starts, and `compressionReleasePlainCopiesSince()` releases the copies added after that when the command ends, also for a command inside a `MULTI`, a script, or a module call. `compressionAfterCall()` in `afterCommand()` releases all copies when the outermost command ends, and `compressionBeforeSleep()` also releases them, as a safety net. `PFCOUNT` looks up with `LOOKUP_NODECOMPRESS` and decompresses the stored value in place, because it writes its cached count into it.
 
 **Modules.** All module key handles are made in `moduleInitKey()`: `RM_OpenKey`, scan callbacks, and key events. A read handle always gets its own plain copy, with or without a child, and the stored value stays compressed. So a module that scans the keyspace does not decompress all of it. The handle owns the copy (`owns_value`), and `moduleCloseKey()` frees it. A write handle decompresses the stored value in place.
 
 **Failure.** Frames are checked when they are made and when RDB loads, so a decompression failure here means a bug or broken memory. `lookupKey()` cannot return an error (NULL means "no key"), so it stops the server with `serverPanic()`.
 
-No side-map is needed. Commands run on the main thread, so a change in place cannot race another command. Forkless save is different: a save thread in the same process reads the objects that the main thread gives it, and each of them has a reference from the save (refcount 2 or more). So a read decompresses in place only when the refcount is 1; otherwise it gets a temporary plain copy, as during a child process. The check is per key, so other keys still decompress in place during the save. A write handle of a module (`VM_OpenKey()`) does not decompress an object that the save holds (`bgIteration_isEntryInuse()`), because `VM_OpenKey()` refuses that key after the lookup. A write to a small string that is not saved yet sends a clone to the save thread first (`tryCloneDbEntry()`); a compressed value is cloned as its plain bytes (`compressorCreatePlainClone()`). The sweeper compresses only values with refcount 1, so it never changes an object that the save holds. The save thread itself never decompresses: forkless save writes only RDB version 82 files, which keep frames as they are (§4.3), and a full sync, which can ask for an older RDB version, always uses a child process.
+No side-map is needed. Commands run on the main thread, so a change in place cannot race another command. Forkless save is different: a save thread in the same process reads the objects that the main thread gives it, and each of them has a reference from the save (refcount 2 or more). So a read decompresses in place only when the refcount is 1; otherwise it gets a temporary plain copy, as during a child process. The check is per key, so other keys still decompress in place during the save. A write handle of a module (`VM_OpenKey()`) does not decompress an object that the save holds (`bgIteration_isEntryInuse()`), because `VM_OpenKey()` refuses that key after the lookup. A write to a small string that is not saved yet sends a clone to the save thread first (`tryCloneDbEntry()`); a compressed value is cloned as its plain bytes (`compressionCreatePlainClone()`). The sweeper compresses only values with refcount 1, so it never changes an object that the save holds. The save thread itself never decompresses: forkless save writes only RDB version 82 files, which keep frames as they are (§4.3), and a full sync, which can ask for an older RDB version, always uses a child process.
 
 #### Reply ownership
 
@@ -393,29 +393,29 @@ The compressed frame stays immutable and self-describing until a read or a write
 
 ## 8. The algorithm is replaceable
 
-The compression library is never called directly. `src/compressor/compressor_alg.h` holds three objects:
+The compression library is never called directly. It uses the block API of the library (one whole value in, one buffer out, no stream state and no container header), next to the stream compression of `compression.h`, which uses the LZ4 frame format for the RDB and replication byte stream. The algorithm ids are `compressionAlgo` from `compression.h` (`ALGO_LZ4`, `ALGO_ZSTD`), shared with stream compression. `src/compression_block_interface.h` holds three objects:
 
 | Object | What it is |
 |---|---|
-| `compressorApi` | The compression function table. Every entry calls straight into a backend library. Shared, constant, never allocated. |
-| `compressorConfig` | The value size range the operator asked for. |
-| `compressorAlg` | What callers hold. Built by `newCompressor()`, released by `freeCompressor()`. Carries the function table, the plain data, and the backend's private scratch. |
+| `blockCompressorApi` | The compression function table. Every entry calls straight into a backend library. Shared, constant, never allocated. |
+| `blockCompressorConfig` | The value size range the operator asked for. |
+| `blockCompressor` | What callers hold. Built by `blockCompressorCreate()`, released by `blockCompressorFree()`. Carries the function table, the plain data, and the backend's private scratch. |
 
 ```c
-typedef struct compressorApi {
-    int    (*state_new)(compressorAlg *instance);
-    void   (*state_free)(compressorAlg *instance);
-    int    (*train)(compressorAlg *instance, const void *samples, const size_t *sizes,
+typedef struct blockCompressorApi {
+    int    (*state_new)(blockCompressor *instance);
+    void   (*state_free)(blockCompressor *instance);
+    int    (*train)(blockCompressor *instance, const void *samples, const size_t *sizes,
                     unsigned n, void *dict_out, size_t dict_cap);
     void  *(*dict_load)(const void *dict_buf, size_t len);
     void   (*dict_free)(void *cdict);
     size_t (*lib_max_output_size)(size_t input_len);
-    size_t (*compress)(compressorAlg *instance, void *cdict, const void *src,
+    size_t (*compress)(blockCompressor *instance, void *cdict, const void *src,
                        size_t srclen, void *dst, size_t dstcap);
-    size_t (*decompress)(compressorAlg *instance, void *cdict, const void *body,
+    size_t (*decompress)(blockCompressor *instance, void *cdict, const void *body,
                          size_t body_len, void *dst, size_t dstcap);
-    void   (*release)(compressorAlg *instance, void *cdict);
-} compressorApi;
+    void   (*release)(blockCompressor *instance, void *cdict);
+} blockCompressorApi;
 ```
 
 Three shapes here are deliberate.
@@ -426,9 +426,9 @@ Three shapes here are deliberate.
 
 **An instance belongs to one thread and is never shared**, and it never changes after it is built. That is what removes every lock and atomic from this layer. Each worker thread holds one, and the main thread holds one for decompressing on reads. To change a setting, build a new instance and drop the old one.
 
-A loaded dictionary is passed as one `compressorDict` (`id`, `algorithm_id`, `cdict`), not as separate arguments, so a caller cannot write one dictionary's ID with another dictionary's data. `compressorDictIsValid()` checks one.
+A loaded dictionary is passed as one `blockCompressorDict` (`id`, `algorithm_id`, `cdict`), not as separate arguments, so a caller cannot write one dictionary's ID with another dictionary's data. `blockCompressorDictIsValid()` checks one.
 
-A failure returns 0, and the code goes into `instance->last_error`. `compressorStrerror()` maps it to text. The codes are shared by all backends, because none of them is specific to one library.
+A failure returns 0, and the code goes into `instance->last_error`. `blockCompressorStrerror()` maps it to text. The codes are shared by all backends, because none of them is specific to one library.
 
 The backend used for **new compression** is selected at startup from `compression-mode` (§9). Persisted frames may outlive the process that created them, so each frame records its algorithm and format version, and each loaded dictionary is associated with that algorithm (§6.4). The process must retain decoder contexts for every algorithm present in the loaded RDB even when new compression is disabled or configured to use another backend.
 
@@ -455,7 +455,7 @@ All names are normal `CONFIG GET` / `CONFIG SET` settings except `compression-mo
 | `compression-sweeper-samples` | `1`-`10000` keys | `500` | The most keys the sweeper checks in one cron call; with `cursor`, also the most buckets it visits. The default is not final (section 6.1). | Yes |
 | `compression-sweeper-backoff-seconds` | `0`-`3600` seconds | `60` | With `cursor`, the pause after a pass in which less than 1% of the checked keys were eligible. 0 turns the backoff off. A change ends a pause at once (section 6.1). | Yes |
 
-The upper limit of the value sizes is `COMPRESSOR_FRAME_MAX_VALUE_LEN`, so 128 KiB is written in one place only. A bigger value is an error and is never changed without a message.
+The upper limit of the value sizes is `COMPRESSION_VALUE_MAX_LEN`, so 128 KiB is written in one place only. A bigger value is an error and is never changed without a message.
 
 **The mode names the algorithm, so there is no separate `compression-alg`.** One switch says both *whether* to compress and *how*. An operator cannot express the broken state "compression on, no backend chosen."
 
@@ -467,14 +467,14 @@ The upper limit of the value sizes is `COMPRESSOR_FRAME_MAX_VALUE_LEN`, so 128 K
 
 **Advanced settings (v2)**
 
-None of these are configurable in v1. The mechanisms behind them run with the fixed values shown here, defined in `src/compressor/compressor_config.h`. Exposing them via `CONFIG GET`/`CONFIG SET` is v2 work.
+None of these are configurable in v1. The mechanisms behind them run with the fixed values shown here, defined as constants in the code. Exposing them via `CONFIG GET`/`CONFIG SET` is v2 work.
 
 | Name | Values | Default | What it does | Change at runtime |
 |---|---|---|---|---|
 | `compression-min-savings-ratio` | percent | `10` | Net-savings guard. Below this, the frame is thrown away. | No |
 | `compression-min-idle-seconds` | seconds | `60` | Coldness gate in LRU and noeviction modes, and hot-key LRU entry lifetime in every mode. | No |
 | `compression-hot-key-lru-max-entries` | entries | `100000` | Maximum recently read keys excluded from background compression (§7.3). | No |
-| `compression-sweeper-backoff-min-eligible-pct` | percent | `1` | With `cursor`, a pass below this share of eligible keys starts the backoff (`COMPRESSOR_BACKOFF_MIN_ELIGIBLE_PCT`, section 6.1). | No |
+| `compression-sweeper-backoff-min-eligible-pct` | percent | `1` | With `cursor`, a pass below this share of eligible keys starts the backoff (`COMPRESSION_BACKOFF_MIN_ELIGIBLE_PCT`, section 6.1). | No |
 | `compression-dict-min-training-keys` | int | `1000` | First training fires at this key count, and needs this many samples. | No |
 | `compression-dict-max-training-keys` | int | `10000` | Sample cap for one training scan. | No |
 | `compression-training-buffer-size` | bytes | `16777216` (16 MiB) | Sample buffer, allocated in full per scan and freed after it. | No |
@@ -541,11 +541,11 @@ How the counters fit together:
 - `compression_total_keys_eligible = compression_total_jobs_queued + compression_total_keys_skipped_already_queued`
 - `compression_total_jobs_queued + compression_total_incoming_jobs_queued = compression_total_values_compressed + compression_total_values_dropped + compression_jobs_in_flight`
 
-Implementation notes (`src/compressor/compressor_stats.{h,c}`):
+Implementation notes:
 - `compression` is not a default INFO section. `INFO compression`, `INFO all`, and `INFO everything` show it. A plain `INFO` does not, so its output does not change.
-- The three `compressed_values*` gauges change on install, on decompress in place, and on free (`freeStringObject()` calls `compressorStringObjectFreed()`). A value can be freed on a background thread (`FLUSHALL ASYNC`), so these three use relaxed atomics. All other counters change only on the main thread. Gauges and counters are two separate structs, so `CONFIG RESETSTAT` clears only the counters and never writes the gauges: a background free cannot be lost during a reset.
+- The three `compressed_values*` gauges change on install, on decompress in place, and on free (`freeStringObject()` calls `compressionStringObjectFreed()`). A value can be freed on a background thread (`FLUSHALL ASYNC`), so these three use relaxed atomics. All other counters change only on the main thread. Gauges and counters are two separate structs, so `CONFIG RESETSTAT` clears only the counters and never writes the gauges: a background free cannot be lost during a reset.
 - The time counters use `getMonotonicUs()`, read twice per compression or decompression.
-- Any code that creates a compressed value without `compressorSetCompressedValue()` (for example RDB load, in `compressorCreateStringObjectFromFrame()`) must add it to the gauges.
+- Any code that creates a compressed value without `compressionSetCompressedValue()` (for example RDB load, in `compressionCreateStringObjectFromFrame()`) must add it to the gauges.
 
 Later phases add counters for the hot-key LRU (§7.3), dictionary training (§5), and the skip list for already-compressed formats (§6.1).
 
@@ -560,7 +560,7 @@ This is an idea, not a plan yet. The feature changes how string values are store
 What exists today: `./runtest --config compression-mode lz4` adds the setting to every test server (`::global_overrides` in `tests/support/server.tcl`). No new code is needed for this step.
 
 The problem: with only this setting, almost no value gets compressed.
-- Most tests use `noeviction`, so a value must be idle for `COMPRESSOR_MIN_IDLE_SECONDS` (60 seconds). Most tests are shorter.
+- Most tests use `noeviction`, so a value must be idle for `COMPRESSION_MIN_IDLE_SECONDS` (60 seconds). Most tests are shorter.
 - Even a cold value waits for the next sweeper run. Tests usually read a key right after they write it.
 
 What would make it useful: a test-only mode (for example a hidden debug setting) that compresses each eligible value right after the write. Then every read and write path in the suite sees compressed values. It can use the same code as `DEBUG COMPRESS-KEY`.
@@ -575,7 +575,7 @@ Expected cost:
 
 The selected RDB design does not recompress plain values during load: it restores both plain and compressed values as-is (§3.3). The measurements below quantify the alternative and support that choice.
 
-Source: `run-rdb-poc.sh` on branch `valkey-inline-compression-rdb-poc`. 5,000,000 keys, 512-byte JSON-like values, LZ4 with **no dictionary**, three runs of each load per host. The same generated data on every host, so the byte figures are identical and only the environment differs.
+Source: a proof-of-concept load test. 5,000,000 keys, 512-byte JSON-like values, LZ4 with **no dictionary**, three runs of each load per host. The same generated data on every host, so the byte figures are identical and only the environment differs.
 
 | | macOS arm64, libc, page cache | Linux, jemalloc, EBS gp3 | Linux, jemalloc, local NVMe |
 |---|---|---|---|

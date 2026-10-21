@@ -30,7 +30,7 @@
 
 #include "hashtable.h"
 #include "server.h"
-#include "compressor/compressor_object.h"
+#include "compression_object.h"
 #include "ordered_index.h"
 #include "serverassert.h"
 #include "functions.h"
@@ -516,8 +516,8 @@ robj *objectSetKeyAndExpire(robj *o, const_sds key, long long expire) {
     } else if (objectGetType(o) == OBJ_STRING && objectGetEncoding(o) == OBJ_ENCODING_RAW) {
         /* Dup the string. */
         ptr = sdsdup(o->val_ptr);
-    } else if (compressorIsCompressedString(o)) {
-        ptr = compressorDupFrame(o);
+    } else if (compressionIsCompressedString(o)) {
+        ptr = compressionDupFrame(o);
     } else {
         serverAssert(objectGetType(o) != OBJ_STRING);
         /* There are multiple references to this non-string object. Most types
@@ -623,7 +623,7 @@ robj *dupStringObject(const robj *o) {
         d->val_ptr = o->val_ptr;
         return d;
     case OBJ_ENCODING_COMPRESSED:
-        d = createObject(OBJ_STRING, compressorDupFrame(o));
+        d = createObject(OBJ_STRING, compressionDupFrame(o));
         d->encoding = OBJ_ENCODING_COMPRESSED;
         return d;
     default: serverPanic("Wrong encoding."); break;
@@ -707,7 +707,7 @@ robj *createModuleObject(moduleType *mt, void *value) {
 void freeStringObject(robj *o) {
     /* objectSetKeyAndExpire() moves the frame to a new object and leaves this
      * one with no value. Only a frame that is freed here counts. */
-    if (objectGetEncoding(o) == OBJ_ENCODING_COMPRESSED && objectGetVal(o) != NULL) compressorStringObjectFreed(o);
+    if (objectGetEncoding(o) == OBJ_ENCODING_COMPRESSED && objectGetVal(o) != NULL) compressionStringObjectFreed(o);
     if (objectGetEncoding(o) == OBJ_ENCODING_RAW || objectGetEncoding(o) == OBJ_ENCODING_COMPRESSED) {
         sdsfree(objectGetVal(o));
     }
@@ -1091,7 +1091,7 @@ robj *getDecodedObject(robj *o) {
         return dec;
     } else if (objectGetType(o) == OBJ_STRING && objectGetEncoding(o) == OBJ_ENCODING_COMPRESSED) {
         /* A plain copy. The stored value stays compressed. */
-        return createObject(OBJ_STRING, compressorDecompressToSds(o));
+        return createObject(OBJ_STRING, compressionDecompressToSds(o));
     } else {
         serverPanic("Unknown encoding type");
     }
@@ -1182,7 +1182,7 @@ size_t stringObjectLen(robj *o) {
     if (sdsEncodedObject(o)) {
         return sdslen(objectGetVal(o));
     } else if (objectGetEncoding(o) == OBJ_ENCODING_COMPRESSED) {
-        return compressorStringObjectLen(o);
+        return compressionStringObjectLen(o);
     } else {
         return sdigits10((long)objectGetVal(o));
     }

@@ -172,6 +172,21 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
         assert_equal $before [getInfoProperty [r info compression] compression_total_values_decompressed]
     }
 
+    test {STRLEN does not decompress} {
+        set k [new_key]
+        r set $k [compression_value 5]
+        compress_key r $k
+        set info [r info compression]
+        set decompressed [getInfoProperty $info compression_total_values_decompressed]
+        set copies [getInfoProperty $info compression_total_temporary_copies_made]
+        assert_equal [string length [compression_value 5]] [r strlen $k]
+        assert_equal compressed [r object encoding $k]
+        set info [r info compression]
+        assert_equal $decompressed [getInfoProperty $info compression_total_values_decompressed]
+        assert_equal $copies [getInfoProperty $info compression_total_temporary_copies_made]
+        assert_equal 0 [r strlen [new_key]]
+    }
+
     test {DUMP does not decompress, and RESTORE gives the same value} {
         set k [new_key]
         r set $k [compression_value 3]
@@ -640,7 +655,7 @@ start_server {tags {"compression external:skip"} overrides {compression-mode lz4
 
 start_server {tags {"compression external:skip"} overrides {compression-mode lz4}} {
     test {With LRU, only idle values are compressed} {
-        # A new key is not idle for COMPRESSOR_MIN_IDLE_SECONDS, so it stays
+        # A new key is not idle for COMPRESSION_MIN_IDLE_SECONDS, so it stays
         # plain. RESTORE IDLETIME makes a key idle.
         r set hot [compression_value 1]
         r set src [compression_value 2]

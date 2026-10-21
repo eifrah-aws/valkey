@@ -4,18 +4,18 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-#ifndef COMPRESSOR_WORKERS_H
-#define COMPRESSOR_WORKERS_H
+#ifndef COMPRESSION_WORKERS_H
+#define COMPRESSION_WORKERS_H
 
 /* Background compression of cold string values.
  *
  * The main thread picks values and the worker threads compress them:
  *
- *   1. compressorCron() picks keys, with random samples or with a cursor
+ *   1. compressionCron() picks keys, with random samples or with a cursor
  *      scan (compression-sweeper-policy). For each cold plain string that is
  *      not in a job yet, it copies the bytes and queues a job.
  *   2. A worker compresses its copy into a frame.
- *   3. compressorBeforeSleep() installs the frame, but only when the key
+ *   3. compressionBeforeSleep() installs the frame, but only when the key
  *      still holds the same bytes as the copy and can still be compressed.
  *      Otherwise the frame is dropped.
  *
@@ -23,7 +23,7 @@
  * do not make the kernel copy memory that the child shares.
  *
  * Values that come from the primary (replica apply) or from a slot import do
- * not wait until they are cold. compressorKeyModified() adds their key names
+ * not wait until they are cold. compressionKeyModified() adds their key names
  * to a set of incoming keys, and step 1 queues jobs for them first, with no
  * coldness test. This avoids a memory spike during an import or a catch-up.
  *
@@ -38,45 +38,45 @@ struct serverObject;
 /* Starts compression-threads workers when compression-mode is not off.
  * Called once at startup, from InitServerLast(). Returns the number of
  * workers started, 0 when compression is off. */
-int compressorWorkersInit(void);
+int compressionWorkersInit(void);
 
 /* Stops the workers. Used only on a crash, before the memory test. Returns
  * the number of workers stopped. */
-int compressorWorkersKill(void);
+int compressionWorkersKill(void);
 
 /* Picks keys and queues compression jobs. Called from serverCron().
  * Returns the number of jobs queued. */
-int compressorCron(void);
+int compressionCron(void);
 
 /* Jobs queued, running, or done but not installed yet. */
-unsigned long compressorJobsInFlight(void);
+unsigned long compressionJobsInFlight(void);
 
 /* signalModifiedKey() calls this for each key that a command changed. When
  * compression is on and c is the primary or a slot-import client, adds the
  * key name to the incoming keys. Copies no value. Returns true when the key
  * was added, false when it was not (another client, compression off, or the
  * key is already there). */
-bool compressorKeyModified(struct client *c, struct serverDb *db, struct serverObject *key);
+bool compressionKeyModified(struct client *c, struct serverDb *db, struct serverObject *key);
 
 /* The number of incoming keys that wait for a job. */
-unsigned long compressorIncomingPendingKeys(void);
+unsigned long compressionIncomingPendingKeys(void);
 
 /* True while the cursor sweeper is in its backoff pause. */
-bool compressorSweeperIsPaused(void);
+bool compressionSweeperIsPaused(void);
 
 /* The apply function of compression-sweeper-backoff-seconds. Ends a backoff
  * pause, so a change of the setting wakes the sweeper. CONFIG SET does not call
  * it when the value does not change. Returns 1, it can not fail. */
-int compressorSweeperBackoffApply(const char **err);
+int compressionSweeperBackoffApply(const char **err);
 
 /* Installs the frames that the workers finished, and queues jobs for
  * incoming keys. Called from beforeSleep(). Returns the number of frames
  * installed. */
-int compressorBeforeSleep(void);
+int compressionBeforeSleep(void);
 
 /* DEBUG COMPRESS-KEY <key>: compresses the value of the key now, also when it
  * is not cold, and replies OK or an error with the reason. For tests. Returns
  * true when the value was compressed. */
-bool compressorDebugCompressKey(struct client *c);
+bool compressionDebugCompressKey(struct client *c);
 
-#endif /* COMPRESSOR_WORKERS_H */
+#endif /* COMPRESSION_WORKERS_H */

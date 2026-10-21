@@ -35,9 +35,9 @@ version. `(v2)`: improvements for the second version. "Phase 2" in
 8. [DONE] Phase 3b - Slot migration export checked (plain bytes on the wire), with a cluster test (`f6b792dab`, `d968ec3a4`).
 9. [DONE] Phase 3b - Audit of encoding reads, with fixes F1, F3/F4, F5a, F6 (`fafdd2a67`).
 10. [DONE] Phase 3b - `DEBUG COMPRESS-KEY`, free path stub, tests for keyspace events and object free and size (`a2453fe85`).
-11. [DONE] Phase 5 - Cursor sweeper policy (`compression-sweeper-policy`), `COMPRESSOR_SAMPLES_PER_CRON` 500 (`21033ad76`).
+11. [DONE] Phase 5 - Cursor sweeper policy (`compression-sweeper-policy`), `COMPRESSION_SAMPLES_PER_CRON` 500 (`21033ad76`).
 12. [DONE] Phase 5 - Sweeper backoff, `cursor` only: pause after a pass with less than 1% eligible keys (`compression-sweeper-backoff-seconds`).
-13. [DONE] Phase 5 - Benchmark `cursor` and `random`, then choose the defaults. Done: `compression-sweeper-samples` is now a setting (was `COMPRESSOR_SAMPLES_PER_CRON`), the benchmark script and checker (`bench/compression-bench.sh`, `bench/analyze.py`), and two runs on 2026-10-18 (`bench/RESULTS-2026-10-18.md`, 15 scenarios, and `bench/RESULTS-2026-10-18-defrag.md`, 3 scenarios with active defrag). Defaults chosen: `cursor`, 500 samples, and `compression-max-inflight-requests` 1000 (was 100). Repeat runs for the noise go to Phase 8.
+13. [DONE] Phase 5 - Benchmark `cursor` and `random`, then choose the defaults. Done: `compression-sweeper-samples` is now a setting (was `COMPRESSION_SAMPLES_PER_CRON`), the benchmark script and checker (`bench/compression-bench.sh`, `bench/analyze.py`), and two runs on 2026-10-18 (`bench/RESULTS-2026-10-18.md`, 15 scenarios, and `bench/RESULTS-2026-10-18-defrag.md`, 3 scenarios with active defrag). Defaults chosen: `cursor`, 500 samples, and `compression-max-inflight-requests` 1000 (was 100). Repeat runs for the noise go to Phase 8.
 14. [NOT STARTED] (v2) Phase 5 - Magic-byte skip table for data that is already compressed.
 15. [NOT STARTED] (v1) Phase 5 - Check `CLIENT PAUSE WRITE` and replicas, and the missing sweeper tests.
 16. [WIP] (v1) Phase 6 - RDB and AOF persistence: a new RDB type that saves frames as they are. Done: RDB 82 with `RDB_TYPE_STRING_COMPRESSED`, save and load, tests (`f36b501ac`). Left: the dictionary section (with Phase 10), a "save as plain" switch for downgrade, a fixed RDB fixture.
@@ -60,14 +60,14 @@ default, so each one can be merged alone.
 
 | # | PR | Main files | Core files |
 |---|---|---|---|
-| 1 | Design doc + compressor interface + LZ4 backend (a library with no caller) | `design-docs/inline-compression.md`, `compressor_alg*`, `test_compressor_alg.cpp` | build files only |
-| 2 | Compression frame: header, build, parse, checks | `compressor_frame.*`, `test_compressor_frame.cpp` | none |
-| 3 | Encoding + read path + settings: `OBJ_ENCODING_COMPRESSED`, decompress in `lookupKey()`, temporary copies during a child, `DEBUG COMPRESS-KEY`, `compression-mode` and the size settings | `compressor_object.*`, `compressor_config.*` | `object.c`, `db.c`, `server.c`, `config.c`, `debug.c` (small hooks) |
+| 1 | Design doc + block compressor interface + LZ4 backend (a library with no caller) | `design-docs/inline-compression.md`, `compression_block*`, `test_compression_block.cpp` | build files only |
+| 2 | Compression frame: header, build, parse, checks | `compression_value.*`, `test_compression_value.cpp` | none |
+| 3 | Encoding + read path + settings: `OBJ_ENCODING_COMPRESSED`, decompress in `lookupKey()`, temporary copies during a child, `DEBUG COMPRESS-KEY`, `compression-mode` and the size settings | `compression_object.*`, `compression_config.*` | `object.c`, `db.c`, `server.c`, `config.c`, `debug.c` (small hooks) |
 | 4 | Commands that keep the value compressed (`LOOKUP_NODECOMPRESS`), and the audit fixes (`PFCOUNT`, existence-only lookups) | | `db.c`, `t_string.c`, `hyperloglog.c`, `cluster.c`, `blocked.c` |
 | 5 | Module API: read handles get a copy, `StringDMA` returns NULL, docs, test module | `tests/modules/compression.c` | `module.c` |
-| 6 | Workers + `random` sweeper + `INFO compression`: worker pool, in-flight set, byte compare | `compressor_workers.*`, `compressor_stats.*` | `server.c` (cron and beforeSleep hooks) |
-| 7 | `cursor` policy + backoff + defaults, with the benchmark numbers in the PR text | `compressor_workers.c` | `config.c` |
-| 8 | RDB format: RDB 82, `RDB_TYPE_STRING_COMPRESSED` | `compressor_object.c` | `rdb.c`, `rdb.h`, `valkey-check-rdb.c` |
+| 6 | Workers + `random` sweeper + `INFO compression`: worker pool, in-flight set, byte compare | `compression_workers.*`, `compression_stats.*` | `server.c` (cron and beforeSleep hooks) |
+| 7 | `cursor` policy + backoff + defaults, with the benchmark numbers in the PR text | `compression_workers.c` | `config.c` |
+| 8 | RDB format: RDB 82, `RDB_TYPE_STRING_COMPRESSED` | `compression_object.c` | `rdb.c`, `rdb.h`, `valkey-check-rdb.c` |
 | 9 | Forkless save, and incoming keys (replica apply, slot import): two small PRs | | `bgiteration.c`, `db.c`, `config.c`, `server.h` |
 
 Rules:
@@ -81,8 +81,8 @@ Rules:
   commits mix topics. Copy the files and hunks of the PR
   (`git checkout valkey-inline-compression -- <files>`), then remove the parts
   that belong to a later PR.
-- The hardest cut is PR 3 / PR 6: `compressor_object.c` and
-  `compressor_workers.c` refer to each other in a few places (stats, debug).
+- The hardest cut is PR 3 / PR 6: `compression_object.c` and
+  `compression_workers.c` refer to each other in a few places (stats, debug).
   Cut those links with small stubs.
 - PR 1 has the whole design doc, also the v2 parts. Add a note at the top
   of the PR text: "this PR adds the design doc and the library; the rest
@@ -93,12 +93,12 @@ Rules:
 
 ## Phase 0 - Compressor interface and LZ4 backend (DONE, pushed)
 
-Commit `89e80d243`. Files moved to `src/compressor/` in Phase 1.
+Commit `89e80d243`. Files moved to `src/` in Phase 1.
 
-- `src/compressor/compressor_alg.h`, `src/compressor/compressor_alg.c`,
-  `src/compressor/compressor_alg_lz4.c`.
-- `src/unit/test_compressor_alg.cpp` (34 tests now).
-- LZ4 has no trainer, so `compressorApi.train` is NULL for LZ4.
+- `src/compression_block_interface.h`, `src/compression_block.c`,
+  `src/compression_block_lz4.c`.
+- `src/unit/test_compression_block.cpp` (34 tests now).
+- LZ4 has no trainer, so `blockCompressorApi.train` is NULL for LZ4.
 
 ---
 
@@ -118,7 +118,7 @@ are decided, or are open until the matching phase.
    No per-type or per-algorithm encodings.
 2. **Net-savings guard.** Appendix A shows that the guard must compare
    allocation sizes (`zmalloc_size` / `sdsAllocSize`), not byte lengths. Done
-   in the code (`compressorFrameSavesMemory()`) and in design section 6.4.
+   in the code (`compressionValueSavesMemory()`) and in design section 6.4.
 3. **Where a read decompresses (decided: in `lookupKey()`).** When
    `lookupKey()` in `src/db.c` finds a compressed string, it decompresses it,
    stores the plain value in the keyspace, and returns it. During a child
@@ -141,7 +141,7 @@ are decided, or are open until the matching phase.
      `lookupKey()`. They read the keyspace directly and must handle
      compressed values themselves.
 4. **Name clash.** `src/compression.{c,h}` is the RDB / replication stream
-   compression. Keep the `compressor_*` prefix for all new files. `INFO
+   compression. New files use the `compression_*` prefix (see the naming rule at the end). `INFO
    compression` does not clash with any other INFO section (checked). Check
    the `COMPRESSION` command name in Phase 11.
 5. **RDB version.** Phase 6 changed `RDB_VERSION` from 81 to 82.
@@ -152,7 +152,7 @@ are decided, or are open until the matching phase.
    needs `BUILD_ZSTD=yes`. LZ4 needs a trainer too; the plan uses the zstd
    `ZDICT` trainer for both.
 7. **Name clash for the hot-key LRU.** `src/hotkeys.c` already exists. Phase
-   4 uses the `compressor_` prefix (`src/compressor/compressor_hotkeys.c`).
+   4 uses the `compressor_` prefix (`src/compressor_hotkeys.c`).
 8. **Unit tests on macOS.** Fixed upstream by `f213a6750` (#4657). Build them
    with CMake. Pass `-DBUILD_UNIT_GTESTS=ON` on every `cmake ..`, because
    `CMakeLists.txt` does not keep it in the cache:
@@ -166,7 +166,7 @@ are decided, or are open until the matching phase.
 
 Commit `e37891511`. No keyspace change.
 
-- `src/compressor/compressor_frame.{h,c}`.
+- `src/compression_value.{h,c}`.
   - 10-byte header (the first design said 12): `uint32_t uncompressed_len`,
     `uint32_t dict_id` (counts up, never reused), `uint8_t algorithm_id`, then
     one byte with `format_version` (high 4 bits) and `original_encoding`
@@ -175,28 +175,28 @@ Commit `e37891511`. No keyspace change.
   - Each field is read and written at a named offset with `memcpy`
     (`frameHeaderEncode()` / `frameHeaderDecode()`).
   - API:
-    - `compressorFrameBuild(c, original_encoding, src, srclen, dict)`
-    - `compressorFrameParse(frame, &hdr)` returns `COMPRESSOR_ERR_NONE` or a
-      `COMPRESSOR_ERR_FRAME_*` code.
-    - `compressorFrameDecompress(c, frame, dict)`
-    - `compressorFrameSavesMemory(orig_alloc, frame_alloc, min_savings_pct)`
-    - `compressorFrameAllocSize(s)`
-    - `dict` is `const compressorDict *` and NULL means no dictionary.
-  - Limits: `COMPRESSOR_FRAME_MAX_VALUE_LEN` (128 KiB),
-    `COMPRESSOR_FRAME_FORMAT_VERSION_MAX` and
-    `COMPRESSOR_FRAME_ORIGINAL_ENCODING_MAX` (both 15).
-- `src/compressor/compressor_alg.h`:
-  - `compressorDict {id, algorithm_id, cdict}` and
-    `compressorDictIsValid()`.
-  - New error codes: `COMPRESSOR_ERR_FRAME_TOO_SHORT`, `_FRAME_VERSION`,
-    `_FRAME_ALGORITHM`, `_FRAME_LENGTH`, `COMPRESSOR_ERR_ALGORITHM_MISMATCH`,
-    `COMPRESSOR_ERR_DICTIONARY_MISMATCH`.
+    - `compressionValueBuild(c, original_encoding, src, srclen, dict)`
+    - `compressionValueParse(frame, &hdr)` returns `BLOCK_COMPRESSOR_ERR_NONE` or a
+      `BLOCK_COMPRESSOR_ERR_FRAME_*` code.
+    - `compressionValueDecompress(c, frame, dict)`
+    - `compressionValueSavesMemory(orig_alloc, frame_alloc, min_savings_pct)`
+    - `compressionValueAllocSize(s)`
+    - `dict` is `const blockCompressorDict *` and NULL means no dictionary.
+  - Limits: `COMPRESSION_VALUE_MAX_LEN` (128 KiB),
+    `COMPRESSION_VALUE_FORMAT_VERSION_MAX` and
+    `COMPRESSION_VALUE_ORIGINAL_ENCODING_MAX` (both 15).
+- `src/compression_block_interface.h`:
+  - `blockCompressorDict {id, algorithm_id, cdict}` and
+    `blockCompressorDictIsValid()`.
+  - New error codes: `BLOCK_COMPRESSOR_ERR_FRAME_TOO_SHORT`, `_FRAME_VERSION`,
+    `_FRAME_ALGORITHM`, `_FRAME_LENGTH`, `BLOCK_COMPRESSOR_ERR_ALGORITHM_MISMATCH`,
+    `BLOCK_COMPRESSOR_ERR_DICTIONARY_MISMATCH`.
 - Error rules: a bad argument from our own code asserts. Bad frame data sets
   `c->last_error` and returns NULL, because frames can come from RDB. The
   frame layer never logs; the caller logs and counts.
-- All feature files moved to `src/compressor/`. `src/CMakeLists.txt` adds
+- All feature files moved to `src/`. `src/CMakeLists.txt` adds
   `src/` as the include root of `valkey-server`.
-- `src/unit/test_compressor_frame.cpp` (19 tests).
+- `src/unit/test_compression_value.cpp` (19 tests).
 
 ## Phase 2 - Configuration (DONE, pushed)
 
@@ -204,16 +204,16 @@ Commit `cc4fbb5fa`.
 
 Configs exist and are checked. Nothing compresses yet.
 
-- New `src/compressor/compressor_config.{h,c}`:
+- New `src/compression_config.{h,c}`:
   - The limits and defaults of the settings.
   - The fixed v1 values of the "advanced (v2)" settings
-    (`COMPRESSOR_MIN_SAVINGS_PCT`, `COMPRESSOR_MIN_IDLE_SECONDS`, ...).
+    (`COMPRESSION_MIN_SAVINGS_PCT`, `COMPRESSION_MIN_IDLE_SECONDS`, ...).
   - Later: `compression-max-inflight-requests` (1-10000, default 100, now 1000,
     can change at runtime) took the place of the fixed
-    `COMPRESSOR_MAX_INFLIGHT_REQUESTS`.
+    `COMPRESSION_MAX_INFLIGHT_REQUESTS`.
   - Later: `compression-lfu-threshold` (0-255, default 4, can change at
-    runtime) took the place of the fixed `COMPRESSOR_LFU_THRESHOLD`.
-  - `compressorConfigCheck()`: min value size must not be greater than max,
+    runtime) took the place of the fixed `COMPRESSION_LFU_THRESHOLD`.
+  - `compressionConfigCheck()`: min value size must not be greater than max,
     and (since 3a) `compression-mode` can not be used with
     `forkless-infrastructure-enabled yes`. It runs at startup (in
     `loadServerConfigFromString()`) and as the apply function of CONFIG SET.
@@ -229,7 +229,7 @@ Configs exist and are checked. Nothing compresses yet.
 
   - `compression-mode` rejects every other value, `zstd` too, until Phase 11.
   - `compression-threads` is 1-16 (changed in 3a). 0 is rejected.
-  - The max value size limit is `COMPRESSOR_FRAME_MAX_VALUE_LEN`. A bigger
+  - The max value size limit is `COMPRESSION_VALUE_MAX_LEN`. A bigger
     value is rejected, never clamped.
   - The `compression-dict-size` range is our choice. The design has no range.
 - `src/server.h`: `server.compression_*` fields.
@@ -248,27 +248,27 @@ we can run benchmarks. This also does most of Phase 5.
 - `OBJ_ENCODING_COMPRESSED` (14) and `LOOKUP_NODECOMPRESS` in `src/server.h`.
   `LOOKUP_NOEFFECTS` does not include `LOOKUP_NODECOMPRESS`: a module can open
   a key with NOEFFECTS and still read its bytes.
-- `src/compressor/compressor_object.{h,c}`:
-  - `compressorGetForMainThread(algorithm_id)`: the main thread's
+- `src/compression_object.{h,c}`:
+  - `compressionGetForMainThread(algorithm_id)`: the main thread's
     compressors for decompressing, one per algorithm, made on first use.
-  - `compressorSetCompressedValue(o, frame)`: install a frame.
-  - `compressorDecompressStringObject(o)`: decompress in place.
-  - `compressorDecompressToSds(o)`: a plain copy; `o` does not change.
-  - `compressorStringObjectLen(o)`: the plain length, from the frame header.
+  - `compressionSetCompressedValue(o, frame)`: install a frame.
+  - `compressionDecompressStringObject(o)`: decompress in place.
+  - `compressionDecompressToSds(o)`: a plain copy; `o` does not change.
+  - `compressionStringObjectLen(o)`: the plain length, from the frame header.
   - Any decompress failure calls `serverPanic()`.
-- `src/compressor/compressor_workers.{h,c}`, three call sites in
+- `src/compression_workers.{h,c}`, three call sites in
   `src/server.c`:
-  - `compressorWorkersInit()` in `InitServerLast()`: starts
-    `compression-threads` workers. Each has its own `compressorAlg`. Jobs go
+  - `compressionWorkersInit()` in `InitServerLast()`: starts
+    `compression-threads` workers. Each has its own `blockCompressor`. Jobs go
     through two `mutexQueue`s.
-  - `compressorCron()` in `serverCron()`: samples up to
-    `COMPRESSOR_SAMPLES_PER_CRON` (100 at the time) keys (db picked by key
+  - `compressionCron()` in `serverCron()`: samples up to
+    `COMPRESSION_SAMPLES_PER_CRON` (100 at the time) keys (db picked by key
     count, then `kvstoreGetFairRandomHashtableIndex()` and
     `kvstoreHashtableSampleEntries()`). Phase 5 added the `cursor` policy.
     Takes RAW strings with refcount 1, in
     the size range, and cold: LFU count at most `compression-lfu-threshold`
     (4; a new key starts at 5, so it is hot until it decays), or idle at
-    least `COMPRESSOR_MIN_IDLE_SECONDS`. Copies the bytes and queues a job.
+    least `COMPRESSION_MIN_IDLE_SECONDS`. Copies the bytes and queues a job.
     Stops at `compression-max-inflight-requests` jobs in flight.
   - Tests make a key cold at once with `make_cold` in
     `tests/support/compression.tcl` (`RESTORE ... REPLACE FREQ 4`).
@@ -279,28 +279,28 @@ we can run benchmarks. This also does most of Phase 5.
     copy-on-write in the child.
   - Random numbers come from `genrand64_int64()` with rejection sampling, so
     a key count above 2^31 is covered.
-  - `compressorWorkersKill()` in `killThreads()` (`debug.c`) stops the
+  - `compressionWorkersKill()` in `killThreads()` (`debug.c`) stops the
     workers before the crash-time memory test.
-  - `compressorBeforeSleep()` in `beforeSleep()`: installs a frame only if
+  - `compressionBeforeSleep()` in `beforeSleep()`: installs a frame only if
     `canCompress()` still passes (RAW, refcount 1, size range, cold), the key
     still holds the same bytes (`memcmp`), and the savings check passes.
     Otherwise the frame is dropped, and `errno` says why.
 - The robj does not change, only its value buffer and its encoding. So the
   key, the TTL, and the LRU data stay.
-- `lookupKey()` calls `compressorLookupValue()`:
+- `lookupKey()` calls `compressionLookupValue()`:
   - not a compressed string, or `LOOKUP_NODECOMPRESS`: the value as it is.
   - a write (`LOOKUP_WRITE`), or no child: decompress in place.
-  - a read while a child runs: `compressorCreatePlainCopy()` makes a
+  - a read while a child runs: `compressionCreatePlainCopy()` makes a
     temporary plain copy with the same key, TTL, and LRU/LFU. The stored
-    value does not change, so no copy-on-write. `compressorAfterCall()` in
+    value does not change, so no copy-on-write. `compressionAfterCall()` in
     `afterCommand()` releases the copies when `server.execution_nesting` is
-    0. `compressorBeforeSleep()` releases them too, as a safety net.
+    0. `compressionBeforeSleep()` releases them too, as a safety net.
   - `PFCOUNT` writes its cache into the copy during a child. Accepted.
 - `objectCommandLookup()` (OBJECT, DEBUG OBJECT) sets `LOOKUP_NODECOMPRESS`.
   `MEMORY USAGE` uses `dbFind()`, so it does not decompress.
 - Module key handles (`moduleInitKey()`): every handle gives the module a
   plain value.
-  - A read handle gets its own plain copy (`compressorCreatePlainCopy()`),
+  - A read handle gets its own plain copy (`compressionCreatePlainCopy()`),
     with or without a child. The stored value stays compressed, so a module
     that scans the keyspace does not decompress all of it. The handle owns the
     copy (`owns_value`), and `moduleCloseKey()` frees it.
@@ -309,8 +309,8 @@ we can run benchmarks. This also does most of Phase 5.
   - A write handle decompresses the stored value in place.
 - Hot path checks: `lookupKey()` and `moduleInitKey()` check
   `val->encoding == OBJ_ENCODING_COMPRESSED` inline before any call.
-  `afterCommand()` calls `compressorAfterCall()` only when
-  `compressorHasPlainCopies()` (a counter of copies on the cleanup list, not
+  `afterCommand()` calls `compressionAfterCall()` only when
+  `compressionHasPlainCopies()` (a counter of copies on the cleanup list, not
   of copies owned by module handles). `serverCron()` and `beforeSleep()` call
   the compressor only when `compression-mode` is not off, or copies exist.
 - `stringObjectLen()`, `compareStringObjectsWithFlags()`, and
@@ -323,7 +323,7 @@ we can run benchmarks. This also does most of Phase 5.
   startup. Forkless save reads keys on another thread, and a read changes a
   compressed value in place.
 - Tests: `tests/unit/compression-encoding.tcl` (24 tests, LFU servers and
-  one LRU server with `RESTORE IDLETIME`), `src/unit/test_compressor_object.cpp`
+  one LRU server with `RESTORE IDLETIME`), `src/unit/test_compression_object.cpp`
   (4 tests), two new tests in `tests/unit/moduleapi/scan.tcl`, and a new
   test module `tests/modules/compression.c` with
   `tests/unit/moduleapi/compression.tcl` (4 tests).
@@ -335,7 +335,7 @@ we can run benchmarks. This also does most of Phase 5.
 
 Commit `14df64e73`.
 
-- `src/compressor/compressor_stats.{h,c}`: the 27 fields of design doc
+- `src/compression_stats.{h,c}`: the 27 fields of design doc
   section 9.1. `compression` is a non-default INFO section.
 - `canCompress()` sets `EALREADY` for a compressed value, so
   `compression_total_keys_skipped_already_compressed` counts it on its own (review finding).
@@ -344,13 +344,13 @@ Commit `14df64e73`.
   (review finding).
 - Gauges (`compressed_values*`) are relaxed atomics, because `FLUSHALL
   ASYNC` frees values on a background thread. `freeStringObject()` calls
-  `compressorStringObjectFreed()`.
+  `compressionStringObjectFreed()`.
 - `CONFIG RESETSTAT` resets the counters, not the gauges. Gauges and counters
   are two structs, so the reset never writes the gauges (review finding).
-- RDB load of frames adds them to the gauges (`compressorCreateStringObjectFromFrame()`, Phase 6).
+- RDB load of frames adds them to the gauges (`compressionCreateStringObjectFromFrame()`, Phase 6).
 - Tests: `tests/unit/compression-info.tcl` (11 tests), including checks that
   the counters add up.
-  `src/unit/test_compressor_stats.cpp` (4 tests).
+  `src/unit/test_compression_stats.cpp` (4 tests).
 
 ## Phase 3b - Other read paths
 
@@ -368,7 +368,7 @@ compressed, and checks the code paths that do not use `lookupKey()`.
   `compression-encoding.tcl`.
 - DONE: `LOOKUP_NODECOMPRESS` in `TOUCH`, `EXPIRE`/`PEXPIRE`/`EXPIREAT`/
   `PEXPIREAT`, `PERSIST`, `RENAME`/`RENAMENX`, `MOVE`, and `COPY` (source and
-  destination). `COPY` copies the frame with `compressorDupFrame()` (in
+  destination). `COPY` copies the frame with `compressionDupFrame()` (in
   `dupStringObject()`), so the copy is not decompressed. The same helper
   covers `objectSetKeyAndExpire()` with a refcount above 1.
 - DONE: slot migration export: checked. The snapshot runs in a forked child
@@ -392,7 +392,7 @@ compressed, and checks the code paths that do not use `lookupKey()`.
     `VM_Call("GET")`). A compromise; we may revise it later.
   - F5a: inside `MULTI`, a script, or a module call, temporary copies were
     kept until the outermost command ended. Now `call()` releases the copies
-    of each command when it ends (`compressorReleasePlainCopiesSince()`).
+    of each command when it ends (`compressionReleasePlainCopiesSince()`).
   - F6: lookups that only check existence or type no longer decompress:
     `SET`, `SET NX/XX`, `MSETNX`, `MSETEX`, `setKey()`, `RESTORE` without
     `REPLACE`, `VM_KeyExists()`, `getNodeByQuery()`, `blocked.c`.
@@ -400,17 +400,17 @@ compressed, and checks the code paths that do not use `lookupKey()`.
     `moduleapi/scan.tcl`.
   - Skipped: F2, `VM_SetLRU()`/`VM_SetLFU()` on a READ handle of a
     compressed key change only the copy.
-- DONE: free path stub. `compressorStringObjectFreed()` reads the frame
+- DONE: free path stub. `compressionStringObjectFreed()` reads the frame
   header one time, for the gauges and for `releaseFrameDictionary()`, which
   only asserts `dict_id == 0`. Phase 10 adds the dictionary user count and
   the backend `release()` call. Note for Phase 10: a free can run on a
-  background thread (`FLUSHALL ASYNC`), and each `compressorAlg` instance
+  background thread (`FLUSHALL ASYNC`), and each `blockCompressor` instance
   belongs to one thread.
 - Forkless save: moved to a separate task, see "Separate task: forkless
   save support" below.
 - DONE: `DEBUG COMPRESS-KEY <key>`: compresses one key now, on the main
-  thread, also when it is not cold (`compressorDebugCompressKey()` in
-  `compressor_workers.c`). Same checks as the sweeper except coldness
+  thread, also when it is not cold (`compressionDebugCompressKey()` in
+  `compression_workers.c`). Same checks as the sweeper except coldness
   (`canCompressValue()`), and the net-savings guard. It does not change the
   sweeper counters. Replies OK or an error with the reason. The test helper
   `compress_key` still uses the sweeper.
@@ -422,7 +422,7 @@ compressed, and checks the code paths that do not use `lookupKey()`.
 
 Goal: bounded set of recently read keys.
 
-- New `src/compressor/compressor_hotkeys.{h,c}`: keyed by `(dbid, key sds)`, MRU-to-LRU
+- New `src/compressor_hotkeys.{h,c}`: keyed by `(dbid, key sds)`, MRU-to-LRU
   list, last touch time, capacity 100,000, expiry after
   `MIN_IDLE_SECONDS`.
 - Hooks: client read helper inserts/refreshes. `DEL`, expiry, eviction,
@@ -439,7 +439,7 @@ Goal: bounded set of recently read keys.
 Status: PARTLY DONE.
 
 - Done in 3a (`eba2a8ffd`): the worker pool (two `mutexQueue`s), the sampler
-  in `compressorCron()`, the coldness test, the in-flight set, the byte
+  in `compressionCron()`, the coldness test, the in-flight set, the byte
   compare at install, the pause during a child, and the 64-bit random number.
   Locking the key was rejected, because it adds latency to client writes
   (design section 6.3.1).
@@ -447,19 +447,19 @@ Status: PARTLY DONE.
 - DONE: `compression-sweeper-policy` `cursor` (default) or `random`. `cursor`
   scans all databases with `kvstoreScan()`, one bucket at a time, and keeps
   its place between cron calls. One pass checks each key one time. A call
-  checks at most `COMPRESSOR_SAMPLES_PER_CRON` keys and visits at most that
+  checks at most `COMPRESSION_SAMPLES_PER_CRON` keys and visits at most that
   many buckets. When it stops in the middle of a bucket (key limit or
   in-flight limit), it keeps the cursor and the number of keys of the bucket
   it handled. The next call skips them and goes on. Test: with one job in
   flight, values that do not compress do not block other keys. New counter `compression_total_sweeper_passes`. The checks
   for one key are in one helper, `checkKey()`, used by both policies.
-  `COMPRESSOR_SAMPLES_PER_CRON` is now 500. The value is not final: it will
+  `COMPRESSION_SAMPLES_PER_CRON` is now 500. The value is not final: it will
   be set after a benchmark. Discussion in design section 6.1.1.
 
 Left:
 
 - DONE: backoff, `cursor` only. At the end of a pass, if less than
-  `COMPRESSOR_BACKOFF_MIN_ELIGIBLE_PCT` (1%) of the checked keys were
+  `COMPRESSION_BACKOFF_MIN_ELIGIBLE_PCT` (1%) of the checked keys were
   eligible, pause for `compression-sweeper-backoff-seconds` (0-3600, default
   60, 0 = off). A pass that checked no key does not pause (importing slots).
   A change of the setting ends a pause. If the change comes in the middle of
@@ -472,8 +472,8 @@ Left:
 - Benchmark `cursor` and `random`, then choose the defaults of
   `compression-sweeper-policy` and `compression-sweeper-samples`.
 - DONE: `compression-sweeper-samples` (1-10000, default 500, runtime) in
-  place of the constant `COMPRESSOR_SAMPLES_PER_CRON`. `random` samples in
-  batches of `COMPRESSOR_SWEEPER_SAMPLE_BATCH` (128), so its stack array does
+  place of the constant `COMPRESSION_SAMPLES_PER_CRON`. `random` samples in
+  batches of `COMPRESSION_SWEEPER_SAMPLE_BATCH` (128), so its stack array does
   not grow with the setting.
 - Open: use the hot-key LRU expiry (Phase 4) as a list of keys to check
   first, in place of a full search (design section 6.1.1).
@@ -503,12 +503,12 @@ Done:
   `rdbver >= 82`. `rdbSaveObject()` writes the frame length and the frame
   bytes, without LZF. An older target (a full sync to a 9.2 replica) gets
   `RDB_TYPE_STRING` and the plain bytes, as before.
-- The code is in `compressor_object.c`, so `rdb.c` has only three small
-  hooks: `compressorRdbSaveCompressedString()` (frame length and bytes) and
-  `compressorRdbLoadCompressedString()` (read, check, report a corrupt RDB).
+- The code is in `compression_object.c`, so `rdb.c` has only three small
+  hooks: `compressionRdbSaveCompressedString()` (frame length and bytes) and
+  `compressionRdbLoadCompressedString()` (read, check, report a corrupt RDB).
   `rdbReportError()` is now declared in `rdb.h` for the load helper.
-- Load: `rdbLoadObject()` calls `compressorRdbLoadCompressedString()`, which
-  reads the frame and calls `compressorCreateStringObjectFromFrame()`. It checks the header (algorithm,
+- Load: `rdbLoadObject()` calls `compressionRdbLoadCompressedString()`, which
+  reads the frame and calls `compressionCreateStringObjectFromFrame()`. It checks the header (algorithm,
   format version, length, `original_encoding` RAW, `dict_id` 0, a backend in
   this build), decompresses the body once into a temporary buffer (a RESTORE
   payload comes from a client, and a read stops the server on a bad frame),
@@ -520,7 +520,7 @@ Done:
   keyspace with gauges, TTL, a server with `compression-mode off`, DUMP type
   byte and RESTORE, 4 bad frames, AOF preamble, `valkey-check-rdb`, full
   sync, a fake 9.2 and 9.3 replica), and two unit tests in
-  `test_compressor_object.cpp`. `compression-encoding.tcl`: the full sync
+  `test_compression_object.cpp`. `compression-encoding.tcl`: the full sync
   test now expects a compressed value on the replica.
   `corrupt-dump-fuzzer.tcl` runs with `compression-mode lz4` and has a
   compressed key, so the fuzzer also corrupts frames (review finding).
@@ -542,12 +542,12 @@ The original plan:
     with `dict_id != 0`.
 - Save: write the frame bytes as-is. AOF rewrite with preamble follows the
   same code. Command-form AOF stays plain (Phase 3).
-- Load: check every frame (`compressorFrameParse()`). Any error fails the
+- Load: check every frame (`compressionValueParse()`). Any error fails the
   load. Phase 10 adds: rebuild the dictionary registry before any value,
   check that each frame's dictionary is there, and rebuild user counts.
 - Loaded frames must be added to the `INFO compression` gauges
-  (`compressorStatsAddValue()`), because they do not go through
-  `compressorSetCompressedValue()`.
+  (`compressionStatsAddValue()`), because they do not go through
+  `compressionSetCompressedValue()`.
 - Loaded values must keep their LRU/LFU data, so they are not cold at once
   only because they were loaded (check).
 - `DEBUG RELOAD`, `replicaof` full sync (disk and diskless), `rdb-key-save`
@@ -570,13 +570,13 @@ Done, with the queue option (the user chose it over compression on the main
 thread):
 
 - Hook: one line in `signalModifiedKey()` (`db.c`) calls
-  `compressorKeyModified()` (`compressor_workers.c`). When compression is on
+  `compressionKeyModified()` (`compression_workers.c`). When compression is on
   and the client is the primary or a slot-import client
   (`getClientType()`), it adds the key name (db id + key) to
   `incoming_keys` (a set, so one entry per key) and `incoming_order` (a
   fifo). No value copy.
-- Drain: `queueIncomingKeys()` from `compressorBeforeSleep()` (after the
-  installs) and from `compressorCron()` (before the sweeper). Oldest first,
+- Drain: `queueIncomingKeys()` from `compressionBeforeSleep()` (after the
+  installs) and from `compressionCron()` (before the sweeper). Oldest first,
   up to `compression-sweeper-samples` keys per call, while the in-flight
   limit has room. A key that is gone or can not be compressed
   (`canCompressValue()`) is dropped from the set. A key that already has a
@@ -688,8 +688,8 @@ New algorithms and dictionaries come last, after the measurements (Phase 8).
 
 - RDB: write the dictionary section that Phase 6 defined, and load it before
   any value. Add the missing dictionary tests.
-- New `src/compressor/compressor_dict.{h,c}`: registry built on `compressorDict`
-  (`{id, algorithm_id, cdict}`, already in `compressor_alg.h`), plus
+- New `src/compression_dict.{h,c}`: registry built on `blockCompressorDict`
+  (`{id, algorithm_id, cdict}`, already in `compression_block_interface.h`), plus
   `bytes` and `users`, up to `DICT_MAX_VERSIONS`. One active entry.
 - Each frame with `dict_id != 0` adds one user at install and removes one at
   free. Remove the entry when it is not active and users reach 0.
@@ -698,7 +698,7 @@ New algorithms and dictionaries come last, after the measurements (Phase 8).
 - Fork safety: the child sees a copy of the registry, so a retire after fork
   can not remove a dictionary the snapshot needs. Check the same for
   `bgiteration` / threaded save paths.
-- Unit tests `src/unit/test_compressor_dict.cpp`.
+- Unit tests `src/unit/test_compression_dict.cpp`.
 
 ## Phase 11 - zstd backend and training
 
@@ -707,7 +707,7 @@ Goal: default algorithm and trained dictionaries.
 - Use zstd through `BUILD_ZSTD` (see "Facts" item 6), not a new folder in
   `deps/`. Open question: the default mode `zstd` then needs
   `BUILD_ZSTD=yes`.
-- `src/compressor/compressor_alg_zstd.c` with `train` (ZDICT), `dict_load`
+- `src/compression_block_zstd.c` with `train` (ZDICT), `dict_load`
   (`ZSTD_createCDict` / `ZSTD_createDDict`), compress, decompress.
 - Open: does LZ4 also get dictionaries from the zstd ZDICT trainer? If yes,
   LZ4 frames made before the first dictionary stay without one (the sweeper
@@ -725,7 +725,7 @@ Goal: default algorithm and trained dictionaries.
 - Remove the `zstd` rejection from Phase 2.
 - Dictionary rule (decided, moved here from Phase 5): with `zstd`, do not
   compress until the first dictionary exists. The first training starts at
-  `COMPRESSOR_DICT_MIN_TRAINING_KEYS` keys. Reason: without a dictionary
+  `COMPRESSION_DICT_MIN_TRAINING_KEYS` keys. Reason: without a dictionary
   small values save little, these frames are never compressed again with
   the new dictionary, and training needs plain sample values. Count values
   skipped while waiting for a dictionary in `INFO compression`.
@@ -738,11 +738,11 @@ Goal: default algorithm and trained dictionaries.
 
 Done: actions 1-5 below. `compression-mode` and
 `forkless-infrastructure-enabled yes` now work together (the refusal in
-`compressorConfigCheck()` is removed).
+`compressionConfigCheck()` is removed).
 
-- Action 1: `compressorCreatePlainClone()` in `compressor_object.c`, and a
+- Action 1: `compressionCreatePlainClone()` in `compression_object.c`, and a
   one-line hook in `tryCloneDbEntry()`.
-- Actions 2 and 3: `compressorLookupValue()`. A read decompresses in place
+- Actions 2 and 3: `compressionLookupValue()`. A read decompresses in place
   only when no child runs and the refcount is 1, else it gets a temporary
   copy. A write returns the value unchanged when
   `bgIteration_isEntryInuse()` is true.
@@ -780,20 +780,20 @@ the key is written). Read commands are never blocked.
    after a restart `GET` returns garbage. The clone pool counter also
    drifts: it adds the plain length (`stringObjectLen()`) and subtracts the
    frame length when the clone is freed.
-   - Fix: a helper in `src/compressor/` that builds the clone from the
-     plain bytes (`compressorDecompressToSds()` on the main thread), and a
+   - Fix: a helper in `src/` that builds the clone from the
+     plain bytes (`compressionDecompressToSds()` on the main thread), and a
      one-line hook in `tryCloneDbEntry()`. Then the clone is a plain string
      with the plain length, so the pool counter is right too.
 2. **A read must not change an object that the save thread holds.**
    `bgIteration_blockClientIfRequired()` blocks only write commands. A
    `GET` on a compressed key that the save thread holds runs at once, and
-   `compressorLookupValue()` decompresses in place (no child process runs).
+   `compressionLookupValue()` decompresses in place (no child process runs).
    This frees the frame while the save thread may write it to the RDB: a
    use-after-free.
-   - Fix: in `compressorLookupValue()`, decompress in place only when
+   - Fix: in `compressionLookupValue()`, decompress in place only when
      `objectGetRefcount(val) == 1`. When it is more than 1, return a
      temporary plain copy (the existing child-save path:
-     `compressorCreatePlainCopy()`, released when the command ends). The
+     `compressionCreatePlainCopy()`, released when the command ends). The
      check is per key: other keys still decompress in place during the
      save. The child-save rule stays global, because a child shares all
      memory pages.
@@ -802,10 +802,10 @@ the key is written). Read commands are never blocked.
    `lookupKeyWriteWithFlags()` first, which decompresses in place
    (`LOOKUP_WRITE`), and only then checks `bgIteration_isEntryInuse()` and
    returns NULL. So the frame is already freed when the key is refused.
-   - Fix: in `compressorLookupValue()`, for `LOOKUP_WRITE`, return the
+   - Fix: in `compressionLookupValue()`, for `LOOKUP_WRITE`, return the
      value unchanged when `bgIteration_isEntryInuse(val)` is true. The
      caller refuses the key anyway. No change in `module.c`.
-4. **Remove the startup refusal** in `compressorConfigCheck()`, and the
+4. **Remove the startup refusal** in `compressionConfigCheck()`, and the
    sentences about it in the design doc (sections 7.2 and 9).
 5. **Tests.**
    - Tcl, with `forkless-infrastructure-enabled yes` and
@@ -965,7 +965,7 @@ commands, ...) reads the bytes on the main thread, so it goes through
 `lookupKey()` and unpacks in place, as today.
 
 When the check fails, `GET` falls back to today's path:
-`compressorLookupValue()`, then `addReplyBulk()`.
+`compressionLookupValue()`, then `addReplyBulk()`.
 
 ### Hot keys
 
@@ -975,7 +975,7 @@ keys plain in the database.
 
 Simple rule in `GET`: if the key is hot (LFU counter above
 `compression-lfu-threshold`, or idle time below
-`COMPRESSOR_MIN_IDLE_SECONDS`), unpack in place on the main thread, as
+`COMPRESSION_MIN_IDLE_SECONDS`), unpack in place on the main thread, as
 today. If the key is cold, send the compressed part.
 
 The first read of a cold key is the one that hurts in the test above. With
@@ -993,7 +993,7 @@ plain from then on. No worker job is needed.
    write-done handler, which already runs on the main thread for
    `BULK_STR_REF`), or do not retire a dictionary while any client has
    output waiting. Not a problem for LZ4 without a dictionary in v1.
-2. **I/O thread state.** One `compressorAlg` and one buffer per I/O thread,
+2. **I/O thread state.** One `blockCompressor` and one buffer per I/O thread,
    made in `io_threads.c` when the thread starts. The buffer must hold up to
    128 KB.
 3. **Numbers that use the plain size.** `addReplyBulk()` checks
@@ -1017,7 +1017,7 @@ plain from then on. No worker job is needed.
 - `src/io_threads.c`: one unpacker and one buffer per I/O thread.
 - `src/t_string.c`: `getGenericCommand()` and `mgetCommand()` use
   `LOOKUP_NODECOMPRESS`. Then they pick: hot key or no I/O threads or not a
-  network client → `compressorLookupValue()` + `addReplyBulk()`; cold key →
+  network client → `compressionLookupValue()` + `addReplyBulk()`; cold key →
   compressed part.
 - `INFO compression`: count answers sent from a frame, and the unpack time
   on the I/O threads.
@@ -1040,26 +1040,38 @@ plain from then on. No worker job is needed.
   `ObjectTest.metadata_changes_embed_threshold` fails after the other
   `ObjectTest` tests. Both problems existed before our changes.
 - Change existing source files as little as possible. When it makes sense,
-  put new logic in a new file (for example `src/compressor/compressor_*.c`) and call it
+  put new logic in a new file (for example `src/compression_*.c`) and call it
   from existing code with a small hook.
-- All feature files live in `src/compressor/` and keep the `compressor_`
-  prefix (`src/dict.h` and `src/hotkeys.c` already exist). Include them as
-  `#include "compressor/compressor_xxx.h"`, never by bare name. `src/` is the
-  include root (`-I.` in `src/Makefile`, `target_include_directories` in
-  `src/CMakeLists.txt`); do not add `src/compressor/` to any include path.
+- All feature files live directly in `src/`, with no subdirectory, and use
+  the `compression_` prefix, like the existing stream compression
+  (`compression.c`, `compression_lz4.c`). Functions use the `compression`
+  prefix, and the block library uses `blockCompressor*` (next to
+  `streamCompressor` in `compression.h`). Algorithm ids are `compressionAlgo`
+  from `compression.h`. (Review of valkey-io/valkey#4965 by zuiderkwast:
+  "compressor" broke the naming style, and Valkey does not use
+  subdirectories for this kind of code.)
+- Renames (2026-10-20): `compressor/compressor_alg.{h,c}` ->
+  `compression_block_interface.h` / `compression_block.c`,
+  `compressor_alg_lz4.c` -> `compression_block_lz4.c`, `compressor_frame` ->
+  `compression_value`, `compressor_{object,config,stats,workers}` ->
+  `compression_{object,config,stats,workers}`, `compressor<Name>()` ->
+  `compression<Name>()`, `compressorFrame<Name>()` -> `compressionValue<Name>()`,
+  `COMPRESSOR_*` -> `COMPRESSION_*` (library: `BLOCK_COMPRESSOR_*`). In a
+  frame, LZ4 is now algorithm id 2 (`ALGO_LZ4`), not 1, so RDB files written
+  by older builds of this branch can not be loaded.
 - After adding a file to `ENGINE_SERVER_OBJ`, run `make distclean`, because
   `src/.make-settings` caches the object list used by the unit test build.
 - No `void` function with an early exit. Return a value (`bool`, a count,
   or a pointer), and set `errno` when it fails. A function with no early
   exit may stay `void`.
   "Free" functions that only return early on NULL (like `free()`) also stay
-  `void`: `freeCompressor()`, `lz4StateFree()`, `lz4DictFree()`.
+  `void`: `blockCompressorFree()`, `lz4StateFree()`, `lz4DictFree()`.
 - Do not duplicate code. When the same logic is needed in more than one
   place, add a helper function and call it from each place.
 - All allocations through `zmalloc`, so the feature cost is in
   `used_memory`.
 - Workers never touch the keyspace or shared server state.
-- No locks or atomics in `compressor_alg*`. Only the job queues need them.
+- No locks or atomics in `compression_block*`. Only the job queues need them.
 - Unit tests in minimal C++ (see `src/unit/README.md`).
 - Run `clang-format-18 -i` on changed C/C++ files.
 - Keep `compression-mode off` with zero cost on the hot path: one branch at

@@ -4,14 +4,14 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 
-/* Background compression of cold string values. See compressor_workers.h. */
+/* Background compression of cold string values. See compression_workers.h. */
 
 #include "server.h"
-#include "compressor/compressor_workers.h"
-#include "compressor/compressor_config.h"
-#include "compressor/compressor_frame.h"
-#include "compressor/compressor_object.h"
-#include "compressor/compressor_stats.h"
+#include "compression_workers.h"
+#include "compression_config.h"
+#include "compression_value.h"
+#include "compression_object.h"
+#include "compression_stats.h"
 #include "lrulfu.h"
 #include "fifo.h"
 #include "mutexqueue.h"
@@ -25,7 +25,7 @@
 
 /* One value to compress. The main thread makes it, a worker fills in frame,
  * and the main thread installs or drops it. */
-typedef struct compressorJob {
+typedef struct compressionJob {
     int dbid;
     sds key;
     sds inflight_name;     /* The job's name in inflight_keys. Owned by that table. */
@@ -33,7 +33,7 @@ typedef struct compressorJob {
     sds frame;             /* Set by the worker. NULL when the value does not get smaller. */
     long long compress_us; /* Set by the worker: time spent compressing. */
     bool incoming;         /* An incoming key: no coldness test at install. */
-} compressorJob;
+} compressionJob;
 
 static mutexQueue *pending_jobs; /* Main thread to workers. NULL when compression is off. */
 static mutexQueue *done_jobs;    /* Workers to main thread. */
@@ -42,13 +42,13 @@ static mutexQueue *done_jobs;    /* Workers to main thread. */
  * yet, so a key is never in two jobs at once. Main thread only. */
 static hashtable *inflight_keys;
 
-/* The incoming keys (see compressor_workers.h), by inflightName(). The table
+/* The incoming keys (see compression_workers.h), by inflightName(). The table
  * owns the names and keeps a key there once; incoming_order holds the same
  * names in arrival order. Main thread only. */
 static hashtable *incoming_keys;
 static fifo *incoming_order;
 
-static pthread_t worker_threads[COMPRESSOR_THREADS_MAX];
+static pthread_t worker_threads[COMPRESSION_THREADS_MAX];
 static int num_workers;
 
 /* The name of a key in inflight_keys: the db id, then the key bytes. */
@@ -61,11 +61,11 @@ static unsigned long inflightCount(void) {
     return inflight_keys ? hashtableSize(inflight_keys) : 0;
 }
 
-unsigned long compressorJobsInFlight(void) {
+unsigned long compressionJobsInFlight(void) {
     return inflightCount();
 }
 
-static void freeJob(compressorJob *job) {
+static void freeJob(compressionJob *job) {
     /* The table owns inflight_name and frees it. */
     hashtableDelete(inflight_keys, job->inflight_name);
     sdsfree(job->key);
@@ -76,7 +76,7 @@ static void freeJob(compressorJob *job) {
 
 /* ----------------------------- Worker threads ----------------------------- */
 
-static void *compressorWorkerMain(void *arg) {
+static void *compressionWorkerMain(void *arg) {
     UNUSED(arg);
     valkey_set_thread_title("compressor");
     makeThreadKillable();
@@ -90,15 +90,15 @@ static void *compressorWorkerMain(void *arg) {
 
     /* compression-mode can't change at runtime, so the worker's compressor
      * stays valid for the life of the thread. */
-    compressorAlg *c = newCompressor(server.compression_mode, NULL);
+    blockCompressor *c = blockCompressorCreate(server.compression_mode, NULL);
     serverAssert(c != NULL);
 
     while (1) {
-        compressorJob *job = mutexQueuePop(pending_jobs, true);
+        compressionJob *job = mutexQueuePop(pending_jobs, true);
         /* For tests: keeps the job in flight longer. */
         if (server.compression_debug_job_delay) debugDelay(server.compression_debug_job_delay);
         monotime start = getMonotonicUs();
-        job->frame = compressorFrameBuild(c, OBJ_ENCODING_RAW, job->input, sdslen(job->input), NULL);
+        job->frame = compressionValueBuild(c, OBJ_ENCODING_RAW, job->input, sdslen(job->input), NULL);
         job->compress_us = (long long)(getMonotonicUs() - start);
         /* A frame that is not smaller can't save memory. Drop it here, so a
          * done job never holds two buffers that are both big. */
@@ -111,8 +111,8 @@ static void *compressorWorkerMain(void *arg) {
     return NULL;
 }
 
-int compressorWorkersInit(void) {
-    if (server.compression_mode == COMPRESSOR_ALG_NONE) return 0;
+int compressionWorkersInit(void) {
+    if (server.compression_mode == ALGO_NONE) return 0;
 
     pending_jobs = mutexQueueCreate();
     done_jobs = mutexQueueCreate();
@@ -123,7 +123,7 @@ int compressorWorkersInit(void) {
     pthread_attr_t attr;
     serverInitThreadAttribute(&attr);
     for (int i = 0; i < server.compression_threads; i++) {
-        int err = pthread_create(&worker_threads[i], &attr, compressorWorkerMain, NULL);
+        int err = pthread_create(&worker_threads[i], &attr, compressionWorkerMain, NULL);
         if (err) {
             serverLog(LL_WARNING, "Fatal: Can't start compressor threads. Error message: %s", strerror(err));
             exit(1);
@@ -134,7 +134,7 @@ int compressorWorkersInit(void) {
     return num_workers;
 }
 
-int compressorWorkersKill(void) {
+int compressionWorkersKill(void) {
     int killed = 0;
     for (int i = 0; i < num_workers; i++) {
         if (pthread_equal(worker_threads[i], pthread_self())) continue;
@@ -161,7 +161,7 @@ static bool isCold(robj *o) {
         lfu_getFrequency(objectGetLRU(o), &freq);
         return freq <= server.compression_lfu_threshold;
     }
-    return lru_getIdleSecs(objectGetLRU(o)) >= COMPRESSOR_MIN_IDLE_SECONDS;
+    return lru_getIdleSecs(objectGetLRU(o)) >= COMPRESSION_MIN_IDLE_SECONDS;
 }
 
 /* Can the value o be compressed, if it is cold? Returns false and sets errno
@@ -172,7 +172,7 @@ static bool isCold(robj *o) {
  *   EBUSY   someone else holds the object, and may read the plain bytes
  *   ERANGE  the size is outside the configured range */
 static bool canCompressValue(robj *o) {
-    if (compressorIsCompressedString(o)) {
+    if (compressionIsCompressedString(o)) {
         errno = EALREADY;
         return false;
     }
@@ -208,11 +208,11 @@ static bool canCompress(robj *o) {
 /* Counts a key that canCompress() refused, by the errno it set. */
 static void countSkippedKey(int err) {
     switch (err) {
-    case EALREADY: compressor_stats.counters.compression_total_keys_skipped_already_compressed++; break;
-    case EINVAL: compressor_stats.counters.compression_total_keys_skipped_not_string++; break;
-    case EBUSY: compressor_stats.counters.compression_total_keys_skipped_in_use++; break;
-    case ERANGE: compressor_stats.counters.compression_total_keys_skipped_size++; break;
-    case EAGAIN: compressor_stats.counters.compression_total_keys_skipped_hot++; break;
+    case EALREADY: compression_stats.counters.compression_total_keys_skipped_already_compressed++; break;
+    case EINVAL: compression_stats.counters.compression_total_keys_skipped_not_string++; break;
+    case EBUSY: compression_stats.counters.compression_total_keys_skipped_in_use++; break;
+    case ERANGE: compression_stats.counters.compression_total_keys_skipped_size++; break;
+    case EAGAIN: compression_stats.counters.compression_total_keys_skipped_hot++; break;
     default: break;
     }
 }
@@ -227,7 +227,7 @@ static bool queueJob(int dbid, robj *o, bool incoming) {
         return false;
     }
 
-    compressorJob *job = zmalloc(sizeof(*job));
+    compressionJob *job = zmalloc(sizeof(*job));
     job->dbid = dbid;
     job->key = sdsdup(objectGetKey(o));
     job->inflight_name = name;
@@ -269,17 +269,17 @@ static serverDb *pickDb(unsigned long long total) {
  * compressed. Returns true when a job was queued. Otherwise returns false,
  * and errno tells why (see canCompress() and queueJob()). */
 static bool checkKey(int dbid, robj *o) {
-    compressor_stats.counters.compression_total_keys_checked++;
+    compression_stats.counters.compression_total_keys_checked++;
     if (!canCompress(o)) {
         countSkippedKey(errno);
         return false;
     }
-    compressor_stats.counters.compression_total_keys_eligible++;
+    compression_stats.counters.compression_total_keys_eligible++;
     if (!queueJob(dbid, o, false)) {
-        compressor_stats.counters.compression_total_keys_skipped_already_queued++;
+        compression_stats.counters.compression_total_keys_skipped_already_queued++;
         return false;
     }
-    compressor_stats.counters.compression_total_jobs_queued++;
+    compression_stats.counters.compression_total_jobs_queued++;
     return true;
 }
 
@@ -290,7 +290,7 @@ static bool inflightIsFull(void) {
 /* The random policy. total is the number of keys in all databases, and must
  * not be 0. Returns the number of jobs queued. */
 static int sweepRandom(unsigned long long total) {
-    void *samples[COMPRESSOR_SWEEPER_SAMPLE_BATCH];
+    void *samples[COMPRESSION_SWEEPER_SAMPLE_BATCH];
     unsigned int limit = (unsigned int)server.compression_sweeper_samples;
     unsigned int sampled = 0;
     int queued = 0;
@@ -299,7 +299,7 @@ static int sweepRandom(unsigned long long total) {
         if (db == NULL) break;
         int didx = kvstoreGetFairRandomHashtableIndex(db->keys);
         unsigned int want = limit - sampled;
-        if (want > COMPRESSOR_SWEEPER_SAMPLE_BATCH) want = COMPRESSOR_SWEEPER_SAMPLE_BATCH;
+        if (want > COMPRESSION_SWEEPER_SAMPLE_BATCH) want = COMPRESSION_SWEEPER_SAMPLE_BATCH;
         unsigned int n = kvstoreHashtableSampleEntries(db->keys, didx, samples, want);
         if (n == 0) break;
         sampled += n;
@@ -363,24 +363,24 @@ static void sweepScanCallback(void *privdata, void *entry, int didx) {
  * the scan skips the importing slots, and the keys must be compressed soon
  * after the import. Such a pass is cheap. */
 static void sweepPassDone(void) {
-    compressor_stats.counters.compression_total_sweeper_passes++;
+    compression_stats.counters.compression_total_sweeper_passes++;
     bool idle = sweep_pass_full && sweep_pass_checked > 0 &&
-                sweep_pass_eligible * 100 < sweep_pass_checked * COMPRESSOR_BACKOFF_MIN_ELIGIBLE_PCT;
+                sweep_pass_eligible * 100 < sweep_pass_checked * COMPRESSION_BACKOFF_MIN_ELIGIBLE_PCT;
     if (idle && server.compression_sweeper_backoff_seconds > 0) {
         sweep_paused_until = getMonotonicUs() + (monotime)server.compression_sweeper_backoff_seconds * 1000000;
-        compressor_stats.counters.compression_total_sweeper_backoffs++;
+        compression_stats.counters.compression_total_sweeper_backoffs++;
     }
     sweep_pass_checked = 0;
     sweep_pass_eligible = 0;
     sweep_pass_full = true;
 }
 
-bool compressorSweeperIsPaused(void) {
-    return server.compression_sweeper_policy == COMPRESSOR_SWEEPER_POLICY_CURSOR && sweep_paused_until != 0 &&
+bool compressionSweeperIsPaused(void) {
+    return server.compression_sweeper_policy == COMPRESSION_SWEEPER_POLICY_CURSOR && sweep_paused_until != 0 &&
            getMonotonicUs() < sweep_paused_until;
 }
 
-int compressorSweeperBackoffApply(const char **err) {
+int compressionSweeperBackoffApply(const char **err) {
     UNUSED(err);
     sweep_paused_until = 0;
     /* A pass that is in progress does not start a pause when it ends. It
@@ -409,7 +409,7 @@ static void sweepNextDb(void) {
  * rehash, FLUSHALL and SWAPDB: at worst a key is checked two times, or waits
  * for the next pass. Returns the number of jobs queued. */
 static int sweepCursor(void) {
-    if (compressorSweeperIsPaused()) return 0;
+    if (compressionSweeperIsPaused()) return 0;
     /* The pause is over, or there was none. sweepPassDone() can start a new
      * one in this call, and then the loop stops. */
     sweep_paused_until = 0;
@@ -444,7 +444,7 @@ static int sweepCursor(void) {
 
 /* ------------------------------ Incoming keys ------------------------------ */
 
-bool compressorKeyModified(client *c, serverDb *db, robj *key) {
+bool compressionKeyModified(client *c, serverDb *db, robj *key) {
     if (incoming_keys == NULL || c == NULL) return false;
     int type = getClientType(c);
     if (type != CLIENT_TYPE_PRIMARY && type != CLIENT_TYPE_SLOT_IMPORT) return false;
@@ -457,7 +457,7 @@ bool compressorKeyModified(client *c, serverDb *db, robj *key) {
     return true;
 }
 
-unsigned long compressorIncomingPendingKeys(void) {
+unsigned long compressionIncomingPendingKeys(void) {
     return incoming_keys ? hashtableSize(incoming_keys) : 0;
 }
 
@@ -486,7 +486,7 @@ static int queueIncomingKeys(void) {
         bool keep = false;
         if (o != NULL && canCompressValue(o)) {
             if (queueJob(dbid, o, true)) {
-                compressor_stats.counters.compression_total_incoming_jobs_queued++;
+                compression_stats.counters.compression_total_incoming_jobs_queued++;
                 queued++;
             } else {
                 keep = (errno == EEXIST);
@@ -508,12 +508,12 @@ static int queueIncomingKeys(void) {
     return queued;
 }
 
-int compressorCron(void) {
+int compressionCron(void) {
     if (pending_jobs == NULL || server.loading) return 0;
     /* Installing a frame changes memory that a child process (BGSAVE,
      * BGREWRITEAOF) still shares, and makes the kernel copy those pages. */
     if (hasActiveChildProcess()) {
-        compressor_stats.counters.compression_total_sweeps_paused_by_child++;
+        compression_stats.counters.compression_total_sweeps_paused_by_child++;
         return 0;
     }
 
@@ -529,7 +529,7 @@ int compressorCron(void) {
     /* Both policies look at no more than compression-sweeper-samples keys per
      * call, and stop when compression-max-inflight-requests jobs are in
      * flight. */
-    if (server.compression_sweeper_policy == COMPRESSOR_SWEEPER_POLICY_CURSOR) return incoming + sweepCursor();
+    if (server.compression_sweeper_policy == COMPRESSION_SWEEPER_POLICY_CURSOR) return incoming + sweepCursor();
     return incoming + sweepRandom(total);
 }
 
@@ -544,60 +544,60 @@ int compressorCron(void) {
  *   ENOENT  the key is gone
  *   ESTALE  the value changed while the job ran
  *   EALREADY, EINVAL, EBUSY, EAGAIN  see canCompress() */
-static bool installJob(compressorJob *job) {
+static bool installJob(compressionJob *job) {
     if (job->frame == NULL) {
-        compressor_stats.counters.compression_total_values_dropped_low_saving++;
+        compression_stats.counters.compression_total_values_dropped_low_saving++;
         errno = ERANGE;
         return false;
     }
     serverDb *db = server.db[job->dbid];
     robj *o = db ? dbFind(db, job->key) : NULL;
     if (o == NULL) {
-        compressor_stats.counters.compression_total_values_dropped_changed++;
+        compression_stats.counters.compression_total_values_dropped_changed++;
         errno = ENOENT;
         return false;
     }
     if (job->incoming ? !canCompressValue(o) : !canCompress(o)) {
-        compressor_stats.counters.compression_total_values_dropped_not_eligible++;
+        compression_stats.counters.compression_total_values_dropped_not_eligible++;
         return false;
     }
 
     sds current = objectGetVal(o);
     size_t len = sdslen(current);
     if (len != sdslen(job->input) || memcmp(current, job->input, len) != 0) {
-        compressor_stats.counters.compression_total_values_dropped_changed++;
+        compression_stats.counters.compression_total_values_dropped_changed++;
         errno = ESTALE;
         return false;
     }
 
-    if (!compressorFrameSavesMemory(compressorFrameAllocSize(current), compressorFrameAllocSize(job->frame),
-                                    COMPRESSOR_MIN_SAVINGS_PCT)) {
-        compressor_stats.counters.compression_total_values_dropped_low_saving++;
+    if (!compressionValueSavesMemory(compressionValueAllocSize(current), compressionValueAllocSize(job->frame),
+                                     COMPRESSION_MIN_SAVINGS_PCT)) {
+        compression_stats.counters.compression_total_values_dropped_low_saving++;
         errno = ERANGE;
         return false;
     }
-    compressorSetCompressedValue(o, job->frame);
+    compressionSetCompressedValue(o, job->frame);
     job->frame = NULL;
-    compressor_stats.counters.compression_total_values_compressed++;
+    compression_stats.counters.compression_total_values_compressed++;
     return true;
 }
 
-int compressorBeforeSleep(void) {
+int compressionBeforeSleep(void) {
     /* Copies made outside a command, for example by a module timer. */
-    compressorReleasePlainCopies();
+    compressionReleasePlainCopies();
 
     if (pending_jobs == NULL || server.loading) return 0;
     /* Leave the results and the incoming keys in their queues while a child
-     * process runs. See compressorCron(). The compare at install catches any
+     * process runs. See compressionCron(). The compare at install catches any
      * change. */
     if (hasActiveChildProcess()) return 0;
 
     int installed = 0;
     fifo *done = inflightCount() ? mutexQueuePopAll(done_jobs, false) : NULL;
     if (done != NULL) {
-        compressorJob *job;
+        compressionJob *job;
         while (fifoPop(done, (void **)&job)) {
-            compressor_stats.counters.compression_total_compression_time_us += job->compress_us;
+            compression_stats.counters.compression_total_compression_time_us += job->compress_us;
             if (installJob(job)) installed++;
             freeJob(job);
         }
@@ -631,15 +631,15 @@ static bool compressKeyNow(serverDb *db, robj *key) {
     if (!canCompressValue(o)) return false;
 
     sds plain = objectGetVal(o);
-    compressorAlg *c = compressorGetForMainThread(server.compression_mode);
-    sds frame = c ? compressorFrameBuild(c, OBJ_ENCODING_RAW, plain, sdslen(plain), NULL) : NULL;
-    if (frame == NULL || !compressorFrameSavesMemory(compressorFrameAllocSize(plain), compressorFrameAllocSize(frame),
-                                                     COMPRESSOR_MIN_SAVINGS_PCT)) {
+    blockCompressor *c = compressionGetForMainThread(server.compression_mode);
+    sds frame = c ? compressionValueBuild(c, OBJ_ENCODING_RAW, plain, sdslen(plain), NULL) : NULL;
+    if (frame == NULL || !compressionValueSavesMemory(compressionValueAllocSize(plain), compressionValueAllocSize(frame),
+                                                      COMPRESSION_MIN_SAVINGS_PCT)) {
         sdsfree(frame);
         errno = ERANGE;
         return false;
     }
-    compressorSetCompressedValue(o, frame);
+    compressionSetCompressedValue(o, frame);
     return true;
 }
 
@@ -655,7 +655,7 @@ static const char *compressKeyError(int err) {
     }
 }
 
-bool compressorDebugCompressKey(client *c) {
+bool compressionDebugCompressKey(client *c) {
     bool done = compressKeyNow(c->db, c->argv[2]);
     if (done) {
         addReply(c, shared.ok);

@@ -36,7 +36,7 @@
 
 #include "server.h"
 #include "intrinsics.h"
-#include "compressor/compressor_object.h"
+#include "compression_object.h"
 
 #include <stdint.h>
 #include <math.h>
@@ -1754,7 +1754,7 @@ void pfcountCommand(client *c) {
         /* The cached count is written into the stored value, so it must be
          * plain. A read during a child process would get a temporary copy,
          * and the cached count would be lost. */
-        if (compressorIsCompressedString(o)) compressorDecompressStringObject(o);
+        if (compressionIsCompressedString(o)) compressionDecompressStringObject(o);
         if (isHLLObjectOrReply(c, o) != C_OK) return;
         o = dbUnshareStringValue(c->db, c->argv[1], o);
 

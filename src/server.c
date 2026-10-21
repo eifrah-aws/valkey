@@ -32,9 +32,9 @@
  * SPDX-License-Identifier: BSD-3-Clause
  */
 #include "server.h"
-#include "compressor/compressor_object.h"
-#include "compressor/compressor_stats.h"
-#include "compressor/compressor_workers.h"
+#include "compression_object.h"
+#include "compression_stats.h"
+#include "compression_workers.h"
 #include "hotkeys.h"
 #include "ordered_index.h"
 #include "connection.h"
@@ -1694,7 +1694,7 @@ long long serverCron(struct aeEventLoop *eventLoop, long long id, void *clientDa
     databasesCron();
 
     /* Pick cold values for background compression. */
-    if (server.compression_mode != COMPRESSOR_ALG_NONE) compressorCron();
+    if (server.compression_mode != ALGO_NONE) compressionCron();
 
     /* Start a scheduled AOF rewrite if this was requested by the user while
      * a BGSAVE was in progress. We don't start the rewrite if there is an
@@ -1997,7 +1997,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     /* Install the values that the compressor threads finished, and release
      * plain copies made outside a command. The second check matters once
      * compressed values can be loaded from RDB with compression-mode off. */
-    if (server.compression_mode != COMPRESSOR_ALG_NONE || compressorHasPlainCopies()) compressorBeforeSleep();
+    if (server.compression_mode != ALGO_NONE || compressionHasPlainCopies()) compressionBeforeSleep();
     /* Handle blocked clients.
      * must be done before flushAppendOnlyFile, in case of appendfsync=always,
      * since the unblocked clients may write data. */
@@ -2931,7 +2931,7 @@ int listenToPort(connListener *sfd) {
 void resetServerStats(void) {
     int j;
 
-    compressorStatsReset();
+    compressionStatsReset();
     server.stat_numcommands = 0;
     server.stat_numconnections = 0;
     server.stat_expiredkeys = 0;
@@ -3404,7 +3404,7 @@ void initListeners(void) {
  * see: https://sourceware.org/bugzilla/show_bug.cgi?id=19329 */
 void InitServerLast(void) {
     bioInit();
-    compressorWorkersInit();
+    compressionWorkersInit();
     initIOThreads(1);
     set_jemalloc_bg_thread(server.jemalloc_bg_thread);
 
@@ -4160,7 +4160,7 @@ void call(client *c, int flags) {
     if (bgIteration_blockClientIfRequired(c)) return;
 
     server.in_call++;
-    unsigned long plain_copies_mark = compressorPlainCopiesListSize();
+    unsigned long plain_copies_mark = compressionPlainCopiesListSize();
 
     long long dirty;
     struct ClientFlags client_old_flags = c->flag;
@@ -4424,7 +4424,7 @@ void call(client *c, int flags) {
     afterCommand(c);
     /* Inside a MULTI, a script, or a module call, release the plain copies
      * of this command now, not when the outermost command ends. */
-    if (unlikely(compressorHasPlainCopies())) compressorReleasePlainCopiesSince(plain_copies_mark);
+    if (unlikely(compressionHasPlainCopies())) compressionReleasePlainCopiesSince(plain_copies_mark);
 
     /* Remember the replication offset of the client, right after its last
      * command that resulted in propagation. */
@@ -4523,7 +4523,7 @@ void afterCommand(client *c) {
     clusterSlotStatsAddNetworkBytesOutForUserClient(c);
 
     /* Release the plain copies that compressed values got for this command. */
-    if (unlikely(compressorHasPlainCopies())) compressorAfterCall();
+    if (unlikely(compressionHasPlainCopies())) compressionAfterCall();
 }
 
 /* Check if c->cmd exists, fills `err` with details in case it doesn't.
@@ -7181,7 +7181,7 @@ sds genValkeyInfoString(dict *section_dict, int all_sections, int everything) {
     /* Compression */
     if (all_sections || (dictFind(section_dict, "compression") != NULL)) {
         if (sections++) info = sdscat(info, "\r\n");
-        info = compressorStatsInfo(info);
+        info = compressionStatsInfo(info);
     }
 
     /* Key space */
