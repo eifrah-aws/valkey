@@ -3022,6 +3022,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error, int rd
 
             /* Insert the key in the radix tree. */
             int retval = raxTryInsert(s->rax, (unsigned char *)nodekey, sizeof(streamID), lp, NULL);
+            if (retval) streamTrackLpAdd(s, lp);
             sdsfree(nodekey);
             if (!retval) {
                 rdbReportCorruptRDB("Listpack re-added with existing key");
@@ -3159,20 +3160,20 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error, int rd
                     decrRefCount(o);
                     return NULL;
                 }
-                streamNACK *nack = streamCreateNACK(NULL);
+                streamNACK *nack = streamCreateNACK(s, NULL);
                 nack->delivery_time = rdbLoadMillisecondTime(rdb, RDB_VERSION);
                 nack->delivery_count = rdbLoadLen(rdb, NULL);
                 if (rioGetReadError(rdb)) {
                     rdbReportReadError("Stream PEL NACK loading failed.");
+                    streamFreeNACK(s, nack); /* Before decrRefCount frees 's'. */
                     decrRefCount(o);
-                    streamFreeNACK(nack);
                     return NULL;
                 }
                 if (!raxTryInsert(cgroup->pel, rawid, sizeof(rawid), nack, NULL)) {
                     rdbReportCorruptRDB("Duplicated global PEL entry "
                                         "loading stream consumer group");
+                    streamFreeNACK(s, nack); /* Before decrRefCount frees 's'. */
                     decrRefCount(o);
-                    streamFreeNACK(nack);
                     return NULL;
                 }
             }
@@ -3192,7 +3193,7 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error, int rd
                     decrRefCount(o);
                     return NULL;
                 }
-                streamConsumer *consumer = streamCreateConsumer(cgroup, cname, NULL, 0, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
+                streamConsumer *consumer = streamCreateConsumer(s, cgroup, cname, NULL, 0, SCC_NO_NOTIFY | SCC_NO_DIRTIFY);
                 sdsfree(cname);
                 if (!consumer) {
                     rdbReportCorruptRDB("Duplicate stream consumer detected.");
@@ -3278,6 +3279,8 @@ robj *rdbLoadObject(int rdbtype, rio *rdb, sds key, int dbid, int *error, int rd
             }
             raxStop(&ri_cg_pel);
         }
+        /* The PELs above are filled with raw rax calls. */
+        streamRecomputeCGroupsMemUsage(s);
     } else if (rdbtype == RDB_TYPE_MODULE_PRE_GA) {
         rdbReportCorruptRDB("Pre-release module format not supported");
         return NULL;
